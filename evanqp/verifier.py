@@ -6,7 +6,7 @@ from torch.utils.data import DataLoader
 from gurobipy import GRB, Model, LinExpr, abs_, max_
 from tqdm import tqdm
 
-from evanqp import SeqNet, QPProblem
+from evanqp import SeqNet, QPProblem, MPCProblem
 from evanqp.sets import Set, Box, Polytope
 
 
@@ -223,9 +223,7 @@ def compile_qp_problem_with_params_as_variables(problem):
 class CompiledQPProblem:
 
     def __init__(self, problem):
-        self.problem = problem
-
-        P, q, A, b, F, g, var_id_to_col = compile_qp_problem_with_params_as_variables(problem.problem())
+        P, q, A, b, F, g, var_id_to_col = compile_qp_problem_with_params_as_variables(problem)
         self.P = P
         self.q = q
         self.A = A
@@ -238,31 +236,36 @@ class CompiledQPProblem:
         self.A = np.vstack((self.A, A))
         self.b = np.concatenate((self.b, b))
 
-    def construct_gurobi_model(self, model):
+    def construct_gurobi_model(self, model, only_primal=False):
         x = [model.addVar(vtype=GRB.CONTINUOUS, lb=-GRB.INFINITY, ub=GRB.INFINITY, name=f'x_{i}') for i in range(self.P.shape[1])]
-        mu = [model.addVar(vtype=GRB.CONTINUOUS, lb=-GRB.INFINITY, ub=GRB.INFINITY, name=f'mu_{i}') for i in range(self.A.shape[0])]
-        lam = [model.addVar(vtype=GRB.CONTINUOUS, lb=0, ub=GRB.INFINITY, name=f'lam_{i}') for i in range(self.F.shape[0])]
+        if not only_primal:
+            mu = [model.addVar(vtype=GRB.CONTINUOUS, lb=-GRB.INFINITY, ub=GRB.INFINITY, name=f'mu_{i}') for i in range(self.A.shape[0])]
+            lam = [model.addVar(vtype=GRB.CONTINUOUS, lb=0, ub=GRB.INFINITY, name=f'lam_{i}') for i in range(self.F.shape[0])]
         model.update()
 
-        for i in range(self.P.shape[0]):
-            model.addConstr(LinExpr(self.P[i, :], x) + self.q[i] + LinExpr(self.A.T[i, :], mu) + LinExpr(self.F.T[i, :], lam) == 0)
+        if not only_primal:
+            for i in range(self.P.shape[0]):
+                model.addConstr(LinExpr(self.P[i, :], x) + self.q[i] + LinExpr(self.A.T[i, :], mu) + LinExpr(self.F.T[i, :], lam) == 0)
         for i in range(self.A.shape[0]):
             model.addConstr(LinExpr(self.A[i, :], x) - self.b[i] == 0)
         for i in range(self.F.shape[0]):
             model.addConstr(LinExpr(self.F[i, :], x) - self.g[i] <= 0)
         model.update()
 
-        r = [model.addVar(vtype=GRB.BINARY, name=f'r_{i}') for i in range(self.F.shape[0])]
-        model.update()
-        for i in range(self.F.shape[0]):
-            # M = 1e5
-            # model.addConstr(F[i, :] @ x - g[i] >= -r[i] * M)
-            # model.addConstr(lam[i] <= (1 - r[i]) * M)
-            model.addConstr((r[i] == 0) >> (LinExpr(self.F[i, :], x) - self.g[i] == 0))
-            model.addConstr((r[i] == 1) >> (lam[i] == 0))
-        model.update()
+        if not only_primal:
+            r = [model.addVar(vtype=GRB.BINARY, name=f'r_{i}') for i in range(self.F.shape[0])]
+            model.update()
+            for i in range(self.F.shape[0]):
+                # M = 1e5
+                # model.addConstr(F[i, :] @ x - g[i] >= -r[i] * M)
+                # model.addConstr(lam[i] <= (1 - r[i]) * M)
+                model.addConstr((r[i] == 0) >> (LinExpr(self.F[i, :], x) - self.g[i] == 0))
+                model.addConstr((r[i] == 1) >> (lam[i] == 0))
+            model.update()
 
-        return x, mu, lam, r
+        if not only_primal:
+            return x, mu, lam, r
+        return x
 
 
 class Verifier:
@@ -378,19 +381,9 @@ class Verifier:
         approx_variables = [model.addVar(vtype=GRB.CONTINUOUS, lb=-GRB.INFINITY, ub=GRB.INFINITY, name=f'av_{i}') for i in range(variable_size)]
         model.update()
 
-        if isinstance(self.parameter_set, Polytope):
-            A, b = self.parameter_set.A, self.parameter_set.b
-            for i in range(A.shape[0]):
-                model.addConstr(LinExpr(A[i, :], parameters) <= b[i])
-        elif isinstance(self.parameter_set, Box):
-            lb, ub = self.parameter_set.lb, self.parameter_set.ub
-            for i in range(lb.shape[0]):
-                model.addConstr(lb[i] <= parameters[i])
-                model.addConstr(parameters[i] <= ub[i])
-        model.update()
-
-        self._connect_problems(self.ref_problem, model, parameters, ref_variables)
-        self._connect_problems(self.approx_problem, model, parameters, approx_variables)
+        self._constrain_parameters(model, parameters)
+        self._connect_problem(self.ref_problem, model, parameters, ref_variables)
+        self._connect_problem(self.approx_problem, model, parameters, approx_variables)
 
         diff = [model.addVar(vtype=GRB.CONTINUOUS, name=f'diff_{i}') for i in range(variable_size)]
         abs_diff = [model.addVar(vtype=GRB.CONTINUOUS, name=f'abs_diff_{i}') for i in range(variable_size)]
@@ -407,9 +400,93 @@ class Verifier:
         return model.objBound, [p.x for p in parameters]
 
     def verify_stability(self, threads=0):
-        pass
+        if not isinstance(self.ref_problem, MPCProblem):
+            raise Exception('The reference problem must be of type MPCProblem.')
 
-    def _connect_problems(self, problem, model, parameters, variables):
+        parameter_size = self.ref_problem.parameter_size()
+        variable_size = self.ref_problem.variable_size()
+
+        model = Model('Max Abs Diff MILP')
+        model.setParam('Threads', threads)
+        model.setParam('NonConvex', 2)  # allow non-convex MIQP formulation
+
+        parameters = [model.addVar(vtype=GRB.CONTINUOUS, lb=-GRB.INFINITY, ub=GRB.INFINITY, name=f'p_{i}') for i in range(parameter_size)]
+        approx_variables = [model.addVar(vtype=GRB.CONTINUOUS, lb=-GRB.INFINITY, ub=GRB.INFINITY, name=f'av_{i}') for i in range(variable_size)]
+        model.update()
+
+        self._constrain_parameters(model, parameters)
+        self._connect_problem(self.approx_problem, model, parameters, approx_variables)
+
+        reduced_objective = self.ref_problem.reduced_objective()
+        reduced_objective_problem = cp.Problem(reduced_objective, self.ref_problem.problem().constraints)
+
+        compiled = CompiledQPProblem(self.ref_problem.problem())
+        reduced_compiled = CompiledQPProblem(reduced_objective_problem)
+
+        A_con = np.zeros((parameter_size + variable_size, reduced_compiled.A.shape[1]))
+        b_con = np.zeros(parameter_size + variable_size, dtype=object)
+        i = 0
+        for j in range(len(self.ref_problem.parameters())):
+            idx = reduced_compiled.var_id_to_col[self.ref_problem.parameters()[j].id]
+            size = self.ref_problem.parameters()[j].size
+            for k in range(size):
+                A_con[i, idx + k] = 1
+                b_con[i] = parameters[i]
+                i += 1
+        i = 0
+        for j in range(len(self.ref_problem.variables())):
+            idx = reduced_compiled.var_id_to_col[self.ref_problem.variables()[j].id]
+            size = self.ref_problem.variables()[j].size
+            for k in range(size):
+                A_con[parameter_size + i, idx + k] = 1
+                b_con[parameter_size + i] = approx_variables[i]
+                i += 1
+        reduced_compiled.add_eq_constraints(A_con, b_con)
+
+        A_par = np.zeros((parameter_size, compiled.A.shape[1]))
+        b_par = np.zeros(parameter_size, dtype=object)
+        i = 0
+        for j in range(len(self.ref_problem.parameters())):
+            idx = compiled.var_id_to_col[self.ref_problem.parameters()[j].id]
+            size = self.ref_problem.parameters()[j].size
+            for k in range(size):
+                A_par[i, idx + k] = 1
+                b_par[i] = parameters[i]
+                i += 1
+        compiled.add_eq_constraints(A_par, b_par)
+
+        x_t, mu, lam, r = reduced_compiled.construct_gurobi_model(model)
+        x = compiled.construct_gurobi_model(model, only_primal=True)
+
+        obj = 0
+        for i in range(compiled.P.shape[0]):
+            for j in range(compiled.P.shape[1]):
+                obj += 0.5 * x[i] * compiled.P[i, j] * x[j]
+            obj += compiled.q[i] * x[i]
+        for i in range(reduced_compiled.P.shape[0]):
+            for j in range(reduced_compiled.P.shape[1]):
+                obj -= 0.5 * x_t[i] * reduced_compiled.P[i, j] * x_t[j]
+            obj -= reduced_compiled.q[i] * x_t[i]
+
+        model.setObjective(obj, GRB.MINIMIZE)
+        model.update()
+        model.optimize()
+
+        return model.objBound, [p.x for p in parameters]
+
+    def _constrain_parameters(self, model, parameters):
+        if isinstance(self.parameter_set, Polytope):
+            A, b = self.parameter_set.A, self.parameter_set.b
+            for i in range(A.shape[0]):
+                model.addConstr(LinExpr(A[i, :], parameters) <= b[i])
+        elif isinstance(self.parameter_set, Box):
+            lb, ub = self.parameter_set.lb, self.parameter_set.ub
+            for i in range(lb.shape[0]):
+                model.addConstr(lb[i] <= parameters[i])
+                model.addConstr(parameters[i] <= ub[i])
+        model.update()
+
+    def _connect_problem(self, problem, model, parameters, variables):
         if isinstance(problem, NNProcessor):
             parameter_size = problem.parameter_size
             variable_size = problem.variable_size
@@ -426,7 +503,7 @@ class Verifier:
         elif isinstance(problem, QPProblem):
             parameter_size = problem.parameter_size()
 
-            compiled = CompiledQPProblem(problem)
+            compiled = CompiledQPProblem(problem.problem())
 
             A_par = np.zeros((parameter_size, compiled.A.shape[1]))
             b_par = np.zeros(parameter_size, dtype=object)

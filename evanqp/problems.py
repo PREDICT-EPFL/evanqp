@@ -1,7 +1,6 @@
 from abc import ABC, abstractmethod
-from typing import List
+from typing import List, Union
 import cvxpy as cp
-from cvxpy.problems.objective import Objective
 
 
 class QPProblem(ABC):
@@ -32,5 +31,5 @@ class QPProblem(ABC):
 class MPCProblem(QPProblem):
 
     @abstractmethod
-    def reduced_objective(self) -> Objective:
+    def reduced_objective(self) -> Union[cp.Minimize, cp.Maximize]:
         pass
