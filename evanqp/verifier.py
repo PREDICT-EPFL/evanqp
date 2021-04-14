@@ -77,7 +77,7 @@ class NNProcessor:
             print(f'Active ReLU neurons: {self.active_relu_count}/{self.total_relus}')
             print(f'Inactive ReLU neurons: {self.inactive_relu_count}/{self.total_relus}')
 
-    def construct_gurobi_model(self, model=None, neurons=None, milp_tightening=False, lp_relaxation=False):
+    def construct_gurobi_model(self, model=None, neurons=None, milp_tightening=False, lp_relaxation=False, guess=None):
         if isinstance(self.parameter_set, Box):
             lb = torch.from_numpy(self.parameter_set.lb).float()
             ub = torch.from_numpy(self.parameter_set.ub).float()
@@ -95,75 +95,91 @@ class NNProcessor:
                     model.addConstr(LinExpr(A[i, :], neurons[-1]) <= b[i])
             model.update()
 
-        for lidx in tqdm(range(self.n_layers)):
-            if isinstance(self.net.blocks[lidx], nn.Linear):
-                weight = self.net.blocks[lidx].weight.detach().cpu()
-                bias = self.net.blocks[lidx].bias.detach().cpu()
-                n_outs = weight.size()[0]
+        self.net.eval()
+        with torch.no_grad():
+            for lidx in tqdm(range(self.n_layers)):
+                if isinstance(self.net.blocks[lidx], nn.Linear):
+                    weight = self.net.blocks[lidx].weight.detach().cpu()
+                    bias = self.net.blocks[lidx].bias.detach().cpu()
+                    n_outs = weight.size()[0]
 
-                lb_new = torch.clamp(weight, max=0) @ ub + torch.clamp(weight, min=0) @ lb + bias
-                ub_new = torch.clamp(weight, min=0) @ ub + torch.clamp(weight, max=0) @ lb + bias
+                    lb_new = torch.clamp(weight, max=0) @ ub + torch.clamp(weight, min=0) @ lb + bias
+                    ub_new = torch.clamp(weight, min=0) @ ub + torch.clamp(weight, max=0) @ lb + bias
 
-                if model is not None:
-                    neurons[lidx] = []
-                    for i in range(n_outs):
-                        neurons[lidx] += [model.addVar(vtype=GRB.CONTINUOUS, lb=lb_new[i].item(), ub=ub_new[i].item(), name=f'n_{lidx}_{i}')]
-                        model.addConstr(neurons[lidx][i] == LinExpr(weight[i, :].detach().cpu().numpy(), neurons[lidx - 1]) + bias[i].item())
-                        model.update()
+                    if model is not None:
+                        neurons[lidx] = []
+                        for i in range(n_outs):
+                            neurons[lidx] += [model.addVar(vtype=GRB.CONTINUOUS, lb=lb_new[i].item(), ub=ub_new[i].item(), name=f'n_{lidx}_{i}')]
+                            model.addConstr(neurons[lidx][i] == LinExpr(weight[i, :].detach().cpu().numpy(), neurons[lidx - 1]) + bias[i].item())
+                            model.update()
 
-                if model is not None and milp_tightening:
-                    for i in range(n_outs):
-                        model.setObjective(neurons[lidx][i], GRB.MINIMIZE)
-                        model.update()
-                        model.optimize()
-                        lb_new[i] = max(model.objBound, lb_new[i])
+                    if model is not None and milp_tightening:
+                        for i in range(n_outs):
+                            model.setObjective(neurons[lidx][i], GRB.MINIMIZE)
+                            model.update()
+                            model.optimize()
+                            lb_new[i] = max(model.objBound, lb_new[i])
 
-                        model.setObjective(neurons[lidx][i], GRB.MAXIMIZE)
-                        model.update()
-                        model.optimize()
-                        ub_new[i] = min(model.objBound, ub_new[i])
+                            model.setObjective(neurons[lidx][i], GRB.MAXIMIZE)
+                            model.update()
+                            model.optimize()
+                            ub_new[i] = min(model.objBound, ub_new[i])
 
-                lb = lb_new
-                ub = ub_new
+                    lb = lb_new
+                    ub = ub_new
 
-            elif isinstance(self.net.blocks[lidx], nn.ReLU):
-                if lidx in self.lbs:
-                    # load already tightened bounds
-                    lb = torch.max(lb, self.lbs[lidx])
-                    ub = torch.min(ub, self.ubs[lidx])
+                elif isinstance(self.net.blocks[lidx], nn.ReLU):
+                    if lidx in self.lbs:
+                        # load already tightened bounds
+                        lb = torch.max(lb, self.lbs[lidx])
+                        ub = torch.min(ub, self.ubs[lidx])
 
-                # save tightened bounds for ReLU inputs
-                self.lbs[lidx] = lb
-                self.ubs[lidx] = ub
+                    # save tightened bounds for ReLU inputs
+                    self.lbs[lidx] = lb
+                    self.ubs[lidx] = ub
 
-                if model is not None:
-                    neurons[lidx] = []
-                    for i in range(len(neurons[lidx - 1])):
-                        if (self.active_relus is not None and self.active_relus[lidx][i]) or lb[i] >= 0:
-                            neurons[lidx] += [neurons[lidx - 1][i]]
-                        elif (self.inactive_relus is not None and self.inactive_relus[lidx][i]) or ub[i] <= 0:
-                            neurons[lidx] += [model.addVar(vtype=GRB.CONTINUOUS, lb=0, ub=0, name=f'n_{lidx}_{i}')]
-                        else:
-                            neurons[lidx] += [model.addVar(vtype=GRB.CONTINUOUS, lb=0, ub=ub[i].item(), name=f'n_{lidx}_{i}')]
-                            if lp_relaxation:
-                                relu_ind = model.addVar(vtype=GRB.CONTINUOUS, name=f'relu_ind{lidx}_{i}')
+                    if model is not None:
+                        if guess is not None:
+                            x_prev = self.net.forward_until(lidx - 1, torch.from_numpy(guess).float())
+                            x = torch.relu(x_prev)
+                            if self.active_relus is not None:
+                                x[self.active_relus[lidx]] = x_prev[self.active_relus[lidx]]
+                                x *= torch.bitwise_not(self.inactive_relus[lidx])
+
+                        neurons[lidx] = []
+                        for i in range(len(neurons[lidx - 1])):
+                            if (self.active_relus is not None and self.active_relus[lidx][i]) or lb[i] >= 0:
+                                neurons[lidx] += [neurons[lidx - 1][i]]
+                            elif (self.inactive_relus is not None and self.inactive_relus[lidx][i]) or ub[i] <= 0:
+                                neurons[lidx] += [model.addVar(vtype=GRB.CONTINUOUS, lb=0, ub=0, name=f'n_{lidx}_{i}')]
                             else:
-                                relu_ind = model.addVar(vtype=GRB.BINARY, name=f'relu_ind{lidx}_{i}')
-                            model.addConstr(neurons[lidx][i] >= 0)
-                            model.addConstr(neurons[lidx][i] >= neurons[lidx - 1][i])
-                            model.addConstr(neurons[lidx][i] <= ub[i].item() * relu_ind)
-                            model.addConstr(neurons[lidx][i] <= neurons[lidx - 1][i] - lb[i].item() * (1 - relu_ind))
-                            model.addConstr((relu_ind == 1) >> (neurons[lidx - 1][i] >= 0))
-                            model.addConstr((relu_ind == 0) >> (neurons[lidx - 1][i] <= 0))
-                        model.update()
+                                neurons[lidx] += [model.addVar(vtype=GRB.CONTINUOUS, lb=0, ub=ub[i].item(), name=f'n_{lidx}_{i}')]
+                                if lp_relaxation:
+                                    relu_ind = model.addVar(vtype=GRB.CONTINUOUS, name=f'relu_ind{lidx}_{i}')
+                                else:
+                                    relu_ind = model.addVar(vtype=GRB.BINARY, name=f'relu_ind{lidx}_{i}')
+                                model.addConstr(neurons[lidx][i] >= 0)
+                                model.addConstr(neurons[lidx][i] >= neurons[lidx - 1][i])
+                                model.addConstr(neurons[lidx][i] <= ub[i].item() * relu_ind)
+                                model.addConstr(neurons[lidx][i] <= neurons[lidx - 1][i] - lb[i].item() * (1 - relu_ind))
+                                model.addConstr((relu_ind == 1) >> (neurons[lidx - 1][i] >= 0))
+                                model.addConstr((relu_ind == 0) >> (neurons[lidx - 1][i] <= 0))
 
-                lb = torch.clamp(lb, min=0)
-                ub = torch.clamp(ub, min=0)
-                if self.inactive_relus is not None:
-                    lb *= torch.bitwise_not(self.inactive_relus[lidx])
-                    ub *= torch.bitwise_not(self.inactive_relus[lidx])
-            else:
-                raise NotImplementedError()
+                                if guess is not None:
+                                    if x[i].item() > 0:
+                                        relu_ind.start = 1
+                                    else:
+                                        relu_ind.start = 0
+
+                            model.update()
+
+                    lb = torch.clamp(lb, min=0)
+                    ub = torch.clamp(ub, min=0)
+                    if self.inactive_relus is not None:
+                        lb *= torch.bitwise_not(self.inactive_relus[lidx])
+                        ub *= torch.bitwise_not(self.inactive_relus[lidx])
+                else:
+                    raise NotImplementedError()
 
         return lb, ub
 
@@ -228,15 +244,28 @@ class CompiledQPProblem:
         self.q = q
         self.A = A
         self.b = b
+        self.b_guess = b
         self.F = F
         self.g = g
         self.var_id_to_col = var_id_to_col
 
-    def add_eq_constraints(self, A, b):
+    def add_eq_constraints(self, A, b, b_guess=None):
         self.A = np.vstack((self.A, A))
         self.b = np.concatenate((self.b, b))
+        if self.b_guess is not None and b_guess is not None:
+            self.b_guess = np.concatenate((self.b_guess, b_guess))
+        else:
+            self.b_guess = None
 
     def construct_gurobi_model(self, model, only_primal=False):
+        if self.b_guess is not None:
+            x = cp.Variable(self.P.shape[1])
+            obj = cp.Minimize(0.5 * cp.quad_form(x, self.P) + self.q.T @ x)
+            eq_con = self.A @ x == self.b_guess
+            ineq_con = self.F @ x <= self.g
+            prob = cp.Problem(obj, [eq_con, ineq_con])
+            prob.solve(solver=cp.GUROBI)
+
         x = [model.addVar(vtype=GRB.CONTINUOUS, lb=-GRB.INFINITY, ub=GRB.INFINITY, name=f'x_{i}') for i in range(self.P.shape[1])]
         if not only_primal:
             mu = [model.addVar(vtype=GRB.CONTINUOUS, lb=-GRB.INFINITY, ub=GRB.INFINITY, name=f'mu_{i}') for i in range(self.A.shape[0])]
@@ -261,6 +290,13 @@ class CompiledQPProblem:
                 # model.addConstr(lam[i] <= (1 - r[i]) * M)
                 model.addConstr((r[i] == 0) >> (LinExpr(self.F[i, :], x) - self.g[i] == 0))
                 model.addConstr((r[i] == 1) >> (lam[i] == 0))
+
+                if self.b_guess is not None and not prob.status in [cp.INFEASIBLE, cp.UNBOUNDED]:
+                    if abs(ineq_con.dual_value[i]) >= 1e-10:
+                        r[i].start = 0
+                    else:
+                        r[i].start = 1
+
             model.update()
 
         if not only_primal:
@@ -365,7 +401,7 @@ class Verifier:
                 print(f'lower bound: {lb}')
                 print(f'upper bound: {ub}')
 
-    def find_max_abs_diff(self, threads=0):
+    def find_max_abs_diff(self, guess=None, threads=0):
         model = Model('Max Abs Diff MILP')
         model.setParam('Threads', threads)
 
@@ -382,8 +418,8 @@ class Verifier:
         model.update()
 
         self._constrain_parameters(model, parameters)
-        self._connect_problem(self.ref_problem, model, parameters, ref_variables)
-        self._connect_problem(self.approx_problem, model, parameters, approx_variables)
+        self._connect_problem(self.ref_problem, model, parameters, ref_variables, guess=guess)
+        self._connect_problem(self.approx_problem, model, parameters, approx_variables, guess=guess)
 
         diff = [model.addVar(vtype=GRB.CONTINUOUS, name=f'diff_{i}') for i in range(variable_size)]
         abs_diff = [model.addVar(vtype=GRB.CONTINUOUS, name=f'abs_diff_{i}') for i in range(variable_size)]
@@ -399,7 +435,7 @@ class Verifier:
 
         return model.objBound, [p.x for p in parameters]
 
-    def verify_stability(self, threads=0):
+    def verify_stability(self, guess=None, threads=0):
         if not isinstance(self.ref_problem, MPCProblem):
             raise Exception('The reference problem must be of type MPCProblem.')
 
@@ -415,7 +451,7 @@ class Verifier:
         model.update()
 
         self._constrain_parameters(model, parameters)
-        self._connect_problem(self.approx_problem, model, parameters, approx_variables)
+        self._connect_problem(self.approx_problem, model, parameters, approx_variables, guess=guess)
 
         reduced_objective = self.ref_problem.reduced_objective()
         reduced_objective_problem = cp.Problem(reduced_objective, self.ref_problem.problem().constraints)
@@ -445,6 +481,10 @@ class Verifier:
 
         A_par = np.zeros((parameter_size, compiled.A.shape[1]))
         b_par = np.zeros(parameter_size, dtype=object)
+        if guess is None:
+            b_guess = None
+        else:
+            b_guess = np.zeros(parameter_size)
         i = 0
         for j in range(len(self.ref_problem.parameters())):
             idx = compiled.var_id_to_col[self.ref_problem.parameters()[j].id]
@@ -452,8 +492,10 @@ class Verifier:
             for k in range(size):
                 A_par[i, idx + k] = 1
                 b_par[i] = parameters[i]
+                if guess is not None:
+                    b_guess[i] = guess[i]
                 i += 1
-        compiled.add_eq_constraints(A_par, b_par)
+        compiled.add_eq_constraints(A_par, b_par, b_guess=b_guess)
 
         x_t, mu, lam, r = reduced_compiled.construct_gurobi_model(model)
         x = compiled.construct_gurobi_model(model, only_primal=True)
@@ -486,13 +528,13 @@ class Verifier:
                 model.addConstr(parameters[i] <= ub[i])
         model.update()
 
-    def _connect_problem(self, problem, model, parameters, variables):
+    def _connect_problem(self, problem, model, parameters, variables, guess=None):
         if isinstance(problem, NNProcessor):
             parameter_size = problem.parameter_size
             variable_size = problem.variable_size
 
             neurons = {}
-            problem.construct_gurobi_model(model=model, neurons=neurons)
+            problem.construct_gurobi_model(model=model, neurons=neurons, guess=guess)
 
             for i in range(parameter_size):
                 model.addConstr(parameters[i] == neurons[-1][i])
@@ -507,6 +549,10 @@ class Verifier:
 
             A_par = np.zeros((parameter_size, compiled.A.shape[1]))
             b_par = np.zeros(parameter_size, dtype=object)
+            if guess is None:
+                b_guess = None
+            else:
+                b_guess = np.zeros(parameter_size)
             i = 0
             for j in range(len(problem.parameters())):
                 idx = compiled.var_id_to_col[problem.parameters()[j].id]
@@ -514,8 +560,10 @@ class Verifier:
                 for k in range(size):
                     A_par[i, idx + k] = 1
                     b_par[i] = parameters[i]
+                    if guess is not None:
+                        b_guess[i] = guess[i]
                     i += 1
-            compiled.add_eq_constraints(A_par, b_par)
+            compiled.add_eq_constraints(A_par, b_par, b_guess)
 
             x, mu, lam, r = compiled.construct_gurobi_model(model)
 
