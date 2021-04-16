@@ -82,8 +82,8 @@ class NNProcessor:
             lb = torch.from_numpy(self.parameter_set.lb).float()
             ub = torch.from_numpy(self.parameter_set.ub).float()
         elif isinstance(self.parameter_set, Polytope):
-            lb = torch.from_numpy(self.parameter_set.largest_interior_box().lb).float()
-            ub = torch.from_numpy(self.parameter_set.largest_interior_box().ub).float()
+            lb = torch.from_numpy(self.parameter_set.bounding_box().lb).float()
+            ub = torch.from_numpy(self.parameter_set.bounding_box().ub).float()
         else:
             raise NotImplementedError()
 

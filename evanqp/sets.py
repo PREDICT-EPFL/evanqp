@@ -12,28 +12,34 @@ class Polytope(Set):
     def __init__(self, A, b):
         self.A = A
         self.b = b
-        self.interior_box = None
+        self._bounding_box = None
 
-    def largest_interior_box(self):
-        if self.interior_box is not None:
-            return self.interior_box
+    def bounding_box(self):
+        if self._bounding_box is not None:
+            return self._bounding_box
 
         n = self.A.shape[1]
 
-        lb = cp.Variable(n)
-        ub = cp.Variable(n)
-        constraints = [lb <= ub,
-                       self.A @ lb <= self.b,
-                       self.A @ ub <= self.b]
-        objective = cp.Maximize(cp.sum(ub - lb))
-        prob = cp.Problem(objective, constraints)
-        prob.solve()
+        lb = -np.inf * np.ones(n)
+        ub = np.inf * np.ones(n)
 
-        if lb.value is None:
-            raise Exception('Could not find largest interior box. Is your polytope compact?')
+        x = cp.Variable(n)
+        constraints = [self.A @ x <= self.b]
+        for i in range(n):
+            prob = cp.Problem(cp.Minimize(x[i]), constraints)
+            prob.solve()
+            if prob.status in [cp.INFEASIBLE, cp.UNBOUNDED]:
+                raise Exception('Could not find bounding box. Is your polytope compact?')
+            lb[i] = prob.value
 
-        self.interior_box = Box(lb.value, ub.value)
-        return self.interior_box
+            prob = cp.Problem(cp.Maximize(x[i]), constraints)
+            prob.solve()
+            if prob.status in [cp.INFEASIBLE, cp.UNBOUNDED]:
+                raise Exception('Could not find bounding box. Is your polytope compact?')
+            ub[i] = prob.value
+
+        self._bounding_box = Box(lb, ub)
+        return self._bounding_box
 
 
 class Box(Set):
