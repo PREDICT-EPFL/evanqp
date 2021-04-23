@@ -1,5 +1,6 @@
 import cvxpy as cp
 import numpy as np
+import scipy.sparse as sp
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
@@ -222,11 +223,11 @@ def compile_qp_problem_with_params_as_variables(problem):
     data, chain, inverse_data = problem.get_problem_data(cp.OSQP)
     compiler = data[cp.settings.PARAM_PROB]
 
-    P = data['P'].toarray()
+    P = data['P']
     q = data['q']
-    A = data['A'].toarray()
+    A = data['A']
     b = data['b']
-    F = data['F'].toarray()
+    F = data['F']
     g = data['G']
 
     restore_params(objective, param_dic)
@@ -250,7 +251,7 @@ class CompiledQPProblem:
         self.var_id_to_col = var_id_to_col
 
     def add_eq_constraints(self, A, b, b_guess=None):
-        self.A = np.vstack((self.A, A))
+        self.A = sp.vstack((self.A, A), format='csc')
         self.b = np.concatenate((self.b, b))
         if self.b_guess is not None and b_guess is not None:
             self.b_guess = np.concatenate((self.b_guess, b_guess))
@@ -274,11 +275,20 @@ class CompiledQPProblem:
 
         if not only_primal:
             for i in range(self.P.shape[0]):
-                model.addConstr(LinExpr(self.P[i, :], x) + self.q[i] + LinExpr(self.A.T[i, :], mu) + LinExpr(self.F.T[i, :], lam) == 0)
+                _, P_col_idx, P_col_coef = sp.find(self.P[i, :])
+                _, A_col_idx, A_col_coef = sp.find(self.A.T[i, :])
+                _, F_col_idx, F_col_coef = sp.find(self.F.T[i, :])
+                model.addConstr(LinExpr(P_col_coef, [x[j] for j in P_col_idx])
+                                + self.q[i]
+                                + LinExpr(A_col_coef, [mu[j] for j in A_col_idx])
+                                + LinExpr(F_col_coef, [lam[j] for j in F_col_idx])
+                                == 0)
         for i in range(self.A.shape[0]):
-            model.addConstr(LinExpr(self.A[i, :], x) - self.b[i] == 0)
+            _, A_col_idx, A_col_coef = sp.find(self.A[i, :])
+            model.addConstr(LinExpr(A_col_coef, [x[j] for j in A_col_idx]) - self.b[i] == 0)
         for i in range(self.F.shape[0]):
-            model.addConstr(LinExpr(self.F[i, :], x) - self.g[i] <= 0)
+            _, F_col_idx, F_col_coef = sp.find(self.F[i, :])
+            model.addConstr(LinExpr(F_col_coef, [x[j] for j in F_col_idx]) - self.g[i] <= 0)
         model.update()
 
         if not only_primal:
@@ -288,7 +298,8 @@ class CompiledQPProblem:
                 # M = 1e5
                 # model.addConstr(F[i, :] @ x - g[i] >= -r[i] * M)
                 # model.addConstr(lam[i] <= (1 - r[i]) * M)
-                model.addConstr((r[i] == 0) >> (LinExpr(self.F[i, :], x) - self.g[i] == 0))
+                _, F_col_idx, F_col_coef = sp.find(self.F[i, :])
+                model.addConstr((r[i] == 0) >> (LinExpr(F_col_coef, [x[j] for j in F_col_idx]) - self.g[i] == 0))
                 model.addConstr((r[i] == 1) >> (lam[i] == 0))
 
                 if self.b_guess is not None and not prob.status in [cp.INFEASIBLE, cp.UNBOUNDED]:
