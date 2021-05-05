@@ -25,7 +25,7 @@ class Verifier:
 
         self.bounds_calculated = False
 
-    def compute_bounds(self, method=Bound.INT_ARITHMETIC):
+    def compute_bounds(self, method=Bound.ZONO_ARITHMETIC):
         self.input_layer.compute_bounds(method)
         self.ref_problem.compute_bounds(method, self.input_layer)
         self.approx_problem.compute_bounds(method, self.input_layer)

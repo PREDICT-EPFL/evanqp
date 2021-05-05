@@ -8,8 +8,7 @@ class Zonotope:
         self.errors = errors
 
     @staticmethod
-    def zonotope_from_box(box):
-        lb, ub = box.lb, box.ub
+    def zonotope_from_box(lb, ub):
         center = 0.5 * (ub + lb)
         beta = 0.5 * (ub - lb)
         errors = np.diag(beta)
@@ -45,8 +44,8 @@ class Zonotope:
         lb, ub = self.concretize()
         if bounds is not None:
             lb_refined, ub_refined = bounds
-            lb = np.max(lb, lb_refined)
-            ub = np.min(ub, ub_refined)
+            lb = np.maximum(lb, lb_refined)
+            ub = np.minimum(ub, ub_refined)
 
         D = 1e-6
         is_cross = (lb < 0) & (ub > 0)

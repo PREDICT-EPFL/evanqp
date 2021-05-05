@@ -6,10 +6,12 @@ from gurobipy import GRB, LinExpr
 from enum import Enum
 
 from evanqp.sets import Box, Polytope
+from evanqp.zonotope import Zonotope
 
 
 class Bound(Enum):
     INT_ARITHMETIC = 0
+    ZONO_ARITHMETIC = 1
 
 
 class Layer:
@@ -17,6 +19,7 @@ class Layer:
     def __init__(self, out_size, depth):
         self.vars = {'out': []}
         self.bounds = {'out': {'lb': np.array([]), 'ub': np.array([])}}
+        self.zono_bounds = {}
         self.out_size = out_size
         self.depth = depth
 
@@ -60,6 +63,9 @@ class InputLayer(Layer):
             self.bounds['out']['lb'] = self.input_set.lb
             self.bounds['out']['ub'] = self.input_set.ub
 
+        if method == Bound.ZONO_ARITHMETIC:
+            self.zono_bounds['out'] = Zonotope.zonotope_from_box(self.bounds['out']['lb'], self.bounds['out']['ub'])
+
 
 class LinearLayer(Layer):
 
@@ -76,6 +82,9 @@ class LinearLayer(Layer):
     def compute_bounds(self, method, p_layer):
         if method == Bound.INT_ARITHMETIC:
             self._compute_bounds_ia(p_layer)
+        elif method == Bound.ZONO_ARITHMETIC:
+            self._compute_bounds_ia(p_layer)
+            self._compute_bounds_zono(p_layer)
         else:
             raise NotImplementedError(f'Method {method} not implemented.')
 
@@ -85,6 +94,12 @@ class LinearLayer(Layer):
 
         self.bounds['out']['lb'] = W_m @ p_layer.bounds['out']['ub'] + W_p @ p_layer.bounds['out']['lb'] + self.bias
         self.bounds['out']['ub'] = W_p @ p_layer.bounds['out']['ub'] + W_m @ p_layer.bounds['out']['lb'] + self.bias
+
+    def _compute_bounds_zono(self, p_layer):
+        self.zono_bounds['out'] = p_layer.zono_bounds['out'].linear(self.weight, self.bias)
+        lb, ub = self.zono_bounds['out'].concretize()
+        self.bounds['out']['lb'] = np.maximum(self.bounds['out']['lb'], lb)
+        self.bounds['out']['ub'] = np.minimum(self.bounds['out']['ub'], ub)
 
 
 class ReluLayer(Layer):
@@ -120,12 +135,22 @@ class ReluLayer(Layer):
     def compute_bounds(self, method, p_layer):
         if method == Bound.INT_ARITHMETIC:
             self._compute_bounds_ia(p_layer)
+        elif method == Bound.ZONO_ARITHMETIC:
+            self._compute_bounds_ia(p_layer)
+            self._compute_bounds_zono(p_layer)
         else:
             raise NotImplementedError(f'Method {method} not implemented.')
 
     def _compute_bounds_ia(self, p_layer):
         self.bounds['out']['lb'] = np.clip(p_layer.bounds['out']['lb'], 0, None)
         self.bounds['out']['ub'] = np.clip(p_layer.bounds['out']['ub'], 0, None)
+
+    def _compute_bounds_zono(self, p_layer):
+        p_lb, p_ub = p_layer.bounds['out']['lb'], p_layer.bounds['out']['ub']
+        self.zono_bounds['out'] = p_layer.zono_bounds['out'].relu(bounds=(p_lb, p_ub))
+        lb, ub = self.zono_bounds['out'].concretize()
+        self.bounds['out']['lb'] = np.maximum(self.bounds['out']['lb'], lb)
+        self.bounds['out']['ub'] = np.minimum(self.bounds['out']['ub'], ub)
 
 
 class QPLayer(Layer):
