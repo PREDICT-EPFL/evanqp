@@ -225,8 +225,7 @@ class QPLayer(Layer):
             model.addConstr(LinExpr(F_col_coef, [self.vars['x'][j] for j in F_col_idx]) - self.g[i] <= 0)
 
         if not only_primal:
-            # r_i = 0 >> F_i @ x = g_i
-            # r_i = 1 >> lam_i = 0
+            # (F_i @ x - g_i) * lam_i = 0
             for i in range(self.F.shape[0]):
                 # M = 1e5
                 # model.addConstr(F[i, :] @ x - g[i] >= -r[i] * M)
