@@ -5,7 +5,7 @@ from gurobipy import GRB, Model, LinExpr, abs_, max_
 from copy import copy
 
 from evanqp.problems import QPProblem, MPCProblem
-from evanqp.layers import Bound, InputLayer, QPLayer, SeqLayers
+from evanqp.layers import Bound, InputLayer, QPLayer, SeqLayer
 
 
 class Verifier:
@@ -14,14 +14,14 @@ class Verifier:
         self.input_layer = InputLayer(parameter_set)
 
         if isinstance(ref_problem, QPProblem):
-            self.ref_problem = SeqLayers([QPLayer(ref_problem, 1)])
+            self.ref_problem = QPLayer(ref_problem, 1)
         else:
-            self.ref_problem = SeqLayers.from_pytorch(ref_problem)
+            self.ref_problem = SeqLayer.from_pytorch(ref_problem)
 
         if isinstance(approx_problem, QPProblem):
-            self.approx_problem = SeqLayers([QPLayer(ref_problem, 1)])
+            self.approx_problem = QPLayer(ref_problem, 1)
         else:
-            self.approx_problem = SeqLayers.from_pytorch(approx_problem)
+            self.approx_problem = SeqLayer.from_pytorch(approx_problem)
 
         self.bounds_calculated = False
 
@@ -31,7 +31,7 @@ class Verifier:
         self.approx_problem.compute_bounds(method, self.input_layer)
         self.bounds_calculated = True
 
-        return self.ref_problem.layers[-1].bounds['out'], self.approx_problem.layers[-1].bounds['out']
+        return self.ref_problem.bounds['out'], self.approx_problem.bounds['out']
 
     def find_max_abs_diff(self, threads=0, output_flag=1):
         model = Model()
@@ -51,10 +51,10 @@ class Verifier:
         self.approx_problem.add_constr(model, self.input_layer)
         model.update()
 
-        diff = [model.addVar(vtype=GRB.CONTINUOUS) for _ in range(self.ref_problem.layers[-1].out_size)]
-        abs_diff = [model.addVar(vtype=GRB.CONTINUOUS) for _ in range(self.ref_problem.layers[-1].out_size)]
-        for i in range(self.ref_problem.layers[-1].out_size):
-            model.addConstr(diff[i] == self.ref_problem.layers[-1].vars['out'][i] - self.approx_problem.layers[-1].vars['out'][i])
+        diff = [model.addVar(vtype=GRB.CONTINUOUS) for _ in range(self.ref_problem.out_size)]
+        abs_diff = [model.addVar(vtype=GRB.CONTINUOUS) for _ in range(self.ref_problem.out_size)]
+        for i in range(self.ref_problem.out_size):
+            model.addConstr(diff[i] == self.ref_problem.vars['out'][i] - self.approx_problem.vars['out'][i])
             model.addConstr(abs_diff[i] == abs_(diff[i]))
         max_abs_diff = model.addVar(vtype=GRB.CONTINUOUS)
         model.addConstr(max_abs_diff == max_(abs_diff))
@@ -66,13 +66,10 @@ class Verifier:
         return model.objBound, [p.x for p in self.input_layer.vars['out']]
 
     def verify_stability(self, threads=0, output_flag=1):
-        if len(self.ref_problem.layers) != 1 \
-                or not isinstance(self.ref_problem.layers[0], QPLayer) \
-                or not isinstance(self.ref_problem.layers[0].problem, MPCProblem):
+        if not isinstance(self.ref_problem, QPLayer) or not isinstance(self.ref_problem.problem, MPCProblem):
             raise Exception('The reference problem must be of type MPCProblem.')
 
-        mpc_layer = self.ref_problem.layers[0]
-        mpc_problem = mpc_layer.problem
+        mpc_problem = self.ref_problem.problem
 
         model = Model()
         model.setParam('Threads', threads)
@@ -94,13 +91,13 @@ class Verifier:
         reduced_objective_mpc_layer.compute_bounds(Bound.INT_ARITHMETIC, self.input_layer)
 
         self.input_layer.add_vars(model)
-        mpc_layer.add_vars(model, only_primal=True)
+        self.ref_problem.add_vars(model, only_primal=True)
         reduced_objective_mpc_layer.add_vars(model)
         self.approx_problem.add_vars(model)
         model.update()
 
         self.input_layer.add_constr(model)
-        mpc_layer.add_constr(model, self.input_layer, only_primal=True)
+        self.ref_problem.add_constr(model, self.input_layer, only_primal=True)
         reduced_objective_mpc_layer.add_constr(model, self.input_layer)
         self.approx_problem.add_constr(model, self.input_layer)
         model.update()
@@ -109,14 +106,14 @@ class Verifier:
             model.addConstr(reduced_objective_mpc_layer.vars['out'][i] == self.approx_problem.layers[-1].vars['out'][i])
         model.update()
 
-        x = mpc_layer.vars['x']
+        x = self.ref_problem.vars['x']
         x_t = reduced_objective_mpc_layer.vars['x']
 
         obj = 0
-        P_row_idx, P_col_idx, P_col_coef = sp.find(mpc_layer.P)
+        P_row_idx, P_col_idx, P_col_coef = sp.find(self.ref_problem.P)
         for i, j, Pij in zip(P_row_idx, P_col_idx, P_col_coef):
             obj += 0.5 * x[i] * Pij * x[j]
-        obj += LinExpr(mpc_layer.q, x)
+        obj += LinExpr(self.ref_problem.q, x)
         P_t_row_idx, P_t_col_idx, P_t_col_coef = sp.find(reduced_objective_mpc_layer.P)
         for i, j, Pij in zip(P_t_row_idx, P_t_col_idx, P_t_col_coef):
             obj -= 0.5 * x_t[i] * Pij * x_t[j]
