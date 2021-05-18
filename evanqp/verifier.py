@@ -27,6 +27,9 @@ class Verifier:
     def compute_bounds(self, method=Bound.ZONO_ARITHMETIC):
         self.input_layer.compute_bounds(method)
         for p in self.problems:
+            if isinstance(p, QPLayer):
+                # for singular QPLayer bounds are not needed
+                continue
             p.compute_bounds(method, self.input_layer)
         self.bounds_calculated = True
 

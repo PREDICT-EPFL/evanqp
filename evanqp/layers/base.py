@@ -19,8 +19,8 @@ class BaseLayer:
 
     def add_vars(self, model):
         self.vars['out'] = [model.addVar(vtype=GRB.CONTINUOUS,
-                                         lb=self.bounds['out']['lb'][i],
-                                         ub=self.bounds['out']['ub'][i])
+                                         lb=self.bounds['out']['lb'][i] if self.bounds['out']['lb'].size > 0 else -GRB.INFINITY,
+                                         ub=self.bounds['out']['ub'][i] if self.bounds['out']['ub'].size > 0 else GRB.INFINITY)
                             for i in range(self.out_size)]
 
     def add_constr(self, model, p_layer):
