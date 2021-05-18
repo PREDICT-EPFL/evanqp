@@ -134,7 +134,7 @@ class Verifier:
 
         return model.objBound, [p.x for p in self.input_layer.vars['out']]
 
-    def variables_in_polytope(self, poly, threads=0, output_flag=1):
+    def variables_in_polytope(self, poly, eps=1e-6, threads=0, output_flag=1):
         if len(self.problems) != 1:
             raise Exception('Number of problems must be 1.')
         if not isinstance(poly, Polytope):
@@ -153,40 +153,32 @@ class Verifier:
             model.update()
             model.optimize()
 
-            if model.objBound > 0:
+            if model.objBound > eps:
                 return False
 
         return True
 
     @staticmethod
-    def min_optimal_mpc_horizon(parameter_set, mpc_factory, poly, threads=0):
+    def min_optimal_mpc_horizon(parameter_set, mpc_factory, poly, eps=1e-6, threads=0):
         N = 1
         mpc_problem = mpc_factory(N)
         print(f'Checking N = {N}')
         verifier = Verifier(parameter_set, mpc_problem)
-        res = verifier.variables_in_polytope(poly, threads, output_flag=0)
+        res = verifier.variables_in_polytope(poly, eps=eps, threads=threads, output_flag=0)
         if res:
             return N
 
         lb = N + 1
-        ub = None
-        while ub is None:
-            N *= 2
-            mpc_problem = mpc_factory(N)
-            print(f'Checking N = {N}')
-            verifier = Verifier(parameter_set, mpc_problem)
-            res = verifier.variables_in_polytope(poly, threads, output_flag=0)
-            if res:
-                ub = N
-            else:
-                lb = N + 1
-
+        ub = float('inf')
         while lb < ub:
-            N = math.floor((lb + ub) / 2)
+            if ub == float('inf'):
+                N *= 2
+            else:
+                N = math.floor((lb + ub) / 2)
             mpc_problem = mpc_factory(N)
             print(f'Checking N = {N}')
             verifier = Verifier(parameter_set, mpc_problem)
-            res = verifier.variables_in_polytope(poly, threads, output_flag=0)
+            res = verifier.variables_in_polytope(poly, eps=eps, threads=threads, output_flag=0)
             if res:
                 ub = N
             else:
