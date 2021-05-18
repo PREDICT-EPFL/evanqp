@@ -103,8 +103,8 @@ class QPLayer(BaseLayer):
 
         old_vars = self.vars
         self.vars = {'out': []}
-        self.bounds['out']['lb'] = [-GRB.INFINITY for _ in range(self.out_size)]
-        self.bounds['out']['ub'] = [GRB.INFINITY for _ in range(self.out_size)]
+        self.bounds['out']['lb'] = np.array([-GRB.INFINITY for _ in range(self.out_size)])
+        self.bounds['out']['ub'] = np.array([GRB.INFINITY for _ in range(self.out_size)])
         self.add_vars(model)
         model.update()
         self.add_constr(model, input_layer)
