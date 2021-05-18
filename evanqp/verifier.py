@@ -1,9 +1,11 @@
 import types
+import math
 import cvxpy as cp
 import scipy.sparse as sp
 from gurobipy import GRB, Model, LinExpr, abs_, max_
 from copy import copy
 
+from evanqp import Polytope
 from evanqp.problems import QPProblem, MPCProblem
 from evanqp.layers import Bound, InputLayer, QPLayer, SeqLayer
 
@@ -30,16 +32,7 @@ class Verifier:
 
         return [p.bounds['out'] for p in self.problems]
 
-    def find_max_abs_diff(self, threads=0, output_flag=1):
-        model = Model()
-        model.setParam('Threads', threads)
-        model.setParam('OutputFlag', output_flag)
-
-        if len(self.problems) != 2:
-            raise Exception('Number of problems must be 2.')
-        if self.problems[0].out_size != self.problems[0].out_size:
-            raise Exception('Problems do not have the same output size')
-
+    def setup_milp(self, model):
         if not self.bounds_calculated:
             self.compute_bounds()
 
@@ -52,6 +45,18 @@ class Verifier:
         for p in self.problems:
             p.add_constr(model, self.input_layer)
         model.update()
+
+    def find_max_abs_diff(self, threads=0, output_flag=1):
+        model = Model()
+        model.setParam('OutputFlag', output_flag)
+        model.setParam('Threads', threads)
+
+        if len(self.problems) != 2:
+            raise Exception('Number of problems must be 2.')
+        if self.problems[0].out_size != self.problems[0].out_size:
+            raise Exception('Problems do not have the same output size')
+
+        self.setup_milp(model)
 
         diff = [model.addVar(vtype=GRB.CONTINUOUS) for _ in range(self.problems[0].out_size)]
         abs_diff = [model.addVar(vtype=GRB.CONTINUOUS) for _ in range(self.problems[0].out_size)]
@@ -76,8 +81,8 @@ class Verifier:
         mpc_problem = self.problems[0].problem
 
         model = Model()
-        model.setParam('Threads', threads)
         model.setParam('OutputFlag', output_flag)
+        model.setParam('Threads', threads)
         model.setParam('NonConvex', 2)  # allow non-convex MIQP formulation
 
         if not self.bounds_calculated:
@@ -128,3 +133,62 @@ class Verifier:
         model.optimize()
 
         return model.objBound, [p.x for p in self.input_layer.vars['out']]
+
+    def variables_in_polytope(self, poly, threads=0, output_flag=1):
+        if len(self.problems) != 1:
+            raise Exception('Number of problems must be 1.')
+        if not isinstance(poly, Polytope):
+            raise Exception('poly must be of type Polytope.')
+        if self.problems[0].out_size != poly.A.shape[1]:
+            raise Exception('poly shape does not match problem output size.')
+
+        model = Model()
+        model.setParam('OutputFlag', output_flag)
+        model.setParam('Threads', threads)
+
+        self.setup_milp(model)
+
+        for i in range(self.problems[0].out_size):
+            model.setObjective(LinExpr(poly.A[i, :], self.problems[0].vars['out']) - poly.b[i], GRB.MAXIMIZE)
+            model.update()
+            model.optimize()
+
+            if model.objBound > 0:
+                return False
+
+        return True
+
+    @staticmethod
+    def min_optimal_mpc_horizon(parameter_set, mpc_factory, poly, threads=0):
+        N = 1
+        mpc_problem = mpc_factory(N)
+        print(f'Checking N = {N}')
+        verifier = Verifier(parameter_set, mpc_problem)
+        res = verifier.variables_in_polytope(poly, threads, output_flag=0)
+        if res:
+            return N
+
+        lb = N + 1
+        ub = None
+        while ub is None:
+            N *= 2
+            mpc_problem = mpc_factory(N)
+            print(f'Checking N = {N}')
+            verifier = Verifier(parameter_set, mpc_problem)
+            res = verifier.variables_in_polytope(poly, threads, output_flag=0)
+            if res:
+                ub = N
+            else:
+                lb = N + 1
+
+        while lb < ub:
+            N = math.floor((lb + ub) / 2)
+            mpc_problem = mpc_factory(N)
+            print(f'Checking N = {N}')
+            verifier = Verifier(parameter_set, mpc_problem)
+            res = verifier.variables_in_polytope(poly, threads, output_flag=0)
+            if res:
+                ub = N
+            else:
+                lb = N + 1
+        return lb
