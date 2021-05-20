@@ -10,10 +10,11 @@ from evanqp.zonotope import Zonotope
 
 class QPLayer(BaseLayer):
 
-    def __init__(self, problem, depth):
+    def __init__(self, problem, depth, skip_bound_computation=True):
         super().__init__(problem.variable_size(), depth)
 
         self.problem = problem
+        self.skip_bound_computation = skip_bound_computation
         P, q, A, b, F, g, var_id_to_col = self.compile_qp_problem_with_params_as_variables(problem.problem())
         self.P = P
         self.q = q
@@ -88,6 +89,9 @@ class QPLayer(BaseLayer):
                 i += 1
 
     def compute_bounds(self, method, p_layer, time_limit=None):
+        if self.skip_bound_computation:
+            return
+
         model = Model()
         model.setParam('OutputFlag', 0)
         if time_limit is not None:
