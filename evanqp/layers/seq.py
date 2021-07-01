@@ -27,6 +27,14 @@ class SeqLayer(BaseLayer):
         self.bounds = self.layers[-1].bounds
         self.zono_bounds = self.layers[-1].zono_bounds
 
+    def compute_ideal_cuts(self, model, p_layer, pp_layer):
+        ineqs = []
+        for layer in self.layers:
+            ineqs += layer.compute_ideal_cuts(model, p_layer, pp_layer)
+            pp_layer = p_layer
+            p_layer = layer
+        return ineqs
+
     @staticmethod
     def from_pytorch(pytorch_model, start_depth=1):
         if not isinstance(pytorch_model, nn.Sequential):

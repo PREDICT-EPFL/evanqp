@@ -1,7 +1,7 @@
 import numpy as np
-from gurobipy import GRB
+from gurobipy import GRB, LinExpr
 
-from evanqp.layers import BaseLayer, Bound
+from evanqp.layers import BaseLayer, BoundArithmetic, LinearLayer
 
 
 class ReluLayer(BaseLayer):
@@ -35,9 +35,9 @@ class ReluLayer(BaseLayer):
                     model.addConstr((self.vars['r'][i] == 0) >> (p_layer.vars['out'][i] <= 0))
 
     def compute_bounds(self, method, p_layer):
-        if method == Bound.INT_ARITHMETIC:
+        if method == BoundArithmetic.INT_ARITHMETIC:
             self._compute_bounds_ia(p_layer)
-        elif method == Bound.ZONO_ARITHMETIC:
+        elif method == BoundArithmetic.ZONO_ARITHMETIC:
             self._compute_bounds_ia(p_layer)
             self._compute_bounds_zono(p_layer)
         else:
@@ -53,3 +53,58 @@ class ReluLayer(BaseLayer):
         lb, ub = self.zono_bounds['out'].concretize()
         self.bounds['out']['lb'] = np.maximum(self.bounds['out']['lb'], lb)
         self.bounds['out']['ub'] = np.minimum(self.bounds['out']['ub'], ub)
+
+    def compute_ideal_cuts(self, model, p_layer, pp_layer):
+        if not isinstance(p_layer, LinearLayer) or not isinstance(pp_layer, BaseLayer):
+            return []
+
+        # https://link.springer.com/content/pdf/10.1007/s10107-020-01474-5.pdf Proposition 12,13
+        _x = np.asarray(model.cbGetNodeRel(pp_layer.vars['out']))
+        _y = np.asarray(model.cbGetNodeRel(self.vars['out']))
+        _z = np.asarray(model.cbGetNodeRel(self.vars['r']))
+
+        ineqs = []
+        for neuron in range(self.out_size):
+            # no cuts are added for a fixed neuron
+            if p_layer.bounds['out']['lb'][neuron] > 0 or p_layer.bounds['out']['ub'][neuron] < 0:
+                continue
+
+            # check for relaxed binary decision variable
+            if _z[neuron] < 0 or _z[neuron] > 1:
+                continue
+
+            _L = np.zeros(pp_layer.out_size)
+            _U = np.zeros(pp_layer.out_size)
+            for i in range(pp_layer.out_size):
+                if p_layer.weight[neuron, i] >= 0:
+                    _L[i] = pp_layer.bounds['out']['lb'][i]
+                    _U[i] = pp_layer.bounds['out']['ub'][i]
+                else:
+                    _L[i] = pp_layer.bounds['out']['ub'][i]
+                    _U[i] = pp_layer.bounds['out']['lb'][i]
+
+            I_map = (p_layer.weight[neuron, :] * _x) < (p_layer.weight[neuron, :] * (_L * (1 - _z[neuron]) + _U * _z[neuron]))
+
+            rhs = p_layer.bias[neuron] * _z[neuron]
+            for i in range(pp_layer.out_size):
+                if I_map[i]:
+                    rhs += p_layer.weight[neuron, i] * (_x[i] - _L[i] * (1 - _z[neuron]))
+                else:
+                    rhs += p_layer.weight[neuron, i] * _U[i] * _z[neuron]
+
+            # only add most violated constraint
+            if _y[neuron] > rhs:
+                rhs = LinExpr()
+                s = p_layer.bias[neuron]
+                for i in range(pp_layer.out_size):
+                    if I_map[i]:
+                        rhs.addTerms(p_layer.weight[neuron, i], pp_layer.vars['out'][i])
+                        rhs.addConstant(-p_layer.weight[neuron, i] * _L[i])
+                        rhs.addTerms(p_layer.weight[neuron, i] * _L[i], self.vars['r'][neuron])
+                    else:
+                        s += p_layer.weight[neuron, i] * _U[i]
+                rhs.addTerms(s, self.vars['r'][neuron])
+
+                ineqs.append((self.vars['out'][neuron], rhs))
+
+        return ineqs

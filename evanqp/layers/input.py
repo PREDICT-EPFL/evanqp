@@ -2,7 +2,7 @@ from gurobipy import LinExpr
 
 from evanqp.sets import Box, Polytope
 from evanqp.zonotope import Zonotope
-from evanqp.layers import Bound, BaseLayer
+from evanqp.layers import BoundArithmetic, BaseLayer
 
 
 class InputLayer(BaseLayer):
@@ -32,5 +32,5 @@ class InputLayer(BaseLayer):
             self.bounds['out']['lb'] = self.input_set.lb
             self.bounds['out']['ub'] = self.input_set.ub
 
-        if method == Bound.ZONO_ARITHMETIC:
+        if method == BoundArithmetic.ZONO_ARITHMETIC:
             self.zono_bounds['out'] = Zonotope.zonotope_from_box(self.bounds['out']['lb'], self.bounds['out']['ub'])

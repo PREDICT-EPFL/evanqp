@@ -1,7 +1,7 @@
 import numpy as np
 from gurobipy import LinExpr
 
-from evanqp.layers import BaseLayer, Bound
+from evanqp.layers import BaseLayer, BoundArithmetic
 
 
 class LinearLayer(BaseLayer):
@@ -17,9 +17,9 @@ class LinearLayer(BaseLayer):
             model.addConstr(self.vars['out'][i] == LinExpr(self.weight[i, :], p_layer.vars['out']) + self.bias[i])
 
     def compute_bounds(self, method, p_layer):
-        if method == Bound.INT_ARITHMETIC:
+        if method == BoundArithmetic.INT_ARITHMETIC:
             self._compute_bounds_ia(p_layer)
-        elif method == Bound.ZONO_ARITHMETIC:
+        elif method == BoundArithmetic.ZONO_ARITHMETIC:
             self._compute_bounds_ia(p_layer)
             self._compute_bounds_zono(p_layer)
         else:

@@ -1,5 +1,6 @@
 import types
 import math
+import numpy as np
 import cvxpy as cp
 import scipy.sparse as sp
 from gurobipy import GRB, Model, LinExpr, abs_, max_
@@ -7,7 +8,7 @@ from copy import copy
 
 from evanqp import Polytope
 from evanqp.problems import QPProblem, MPCProblem
-from evanqp.layers import Bound, InputLayer, QPLayer, SeqLayer
+from evanqp.layers import BoundArithmetic, InputLayer, QPLayer, SeqLayer
 
 
 class Verifier:
@@ -24,7 +25,7 @@ class Verifier:
 
         self.bounds_calculated = False
 
-    def compute_bounds(self, method=Bound.ZONO_ARITHMETIC):
+    def compute_bounds(self, method=BoundArithmetic.ZONO_ARITHMETIC):
         self.input_layer.compute_bounds(method)
         for p in self.problems:
             if isinstance(p, QPLayer):
@@ -34,6 +35,12 @@ class Verifier:
         self.bounds_calculated = True
 
         return [p.bounds['out'] for p in self.problems]
+
+    def compute_ideal_cuts(self, model):
+        ineqs = []
+        for p in self.problems:
+            ineqs += p.compute_ideal_cuts(model, self.input_layer, None)
+        return ineqs
 
     def setup_milp(self, model):
         if not self.bounds_calculated:
@@ -49,7 +56,19 @@ class Verifier:
             p.add_constr(model, self.input_layer)
         model.update()
 
-    def find_max_abs_diff(self, threads=0, output_flag=1):
+    def get_callback(self):
+        def _callback(model, where):
+            if where == GRB.Callback.MIPNODE:
+                if model.cbGet(GRB.Callback.MIPNODE_STATUS) == GRB.Status.OPTIMAL:
+                    # decrease cut freq with number of nodes explored
+                    freq = model.cbGet(GRB.Callback.MIPNODE_NODCNT) + 1
+                    if np.random.randint(0, freq, 1) == 0:
+                        ineqs = self.compute_ideal_cuts(model)
+                        for (lhs, rhs) in ineqs:
+                            model.cbCut(lhs <= rhs)
+        return _callback
+
+    def find_max_abs_diff(self, threads=0, output_flag=1, ideal_cuts=False):
         model = Model()
         model.setParam('OutputFlag', output_flag)
         model.setParam('Threads', threads)
@@ -71,11 +90,14 @@ class Verifier:
 
         model.setObjective(max_abs_diff, GRB.MAXIMIZE)
         model.update()
-        model.optimize()
+        if ideal_cuts:
+            model.optimize(self.get_callback())
+        else:
+            model.optimize()
 
         return model.objBound, [p.x for p in self.input_layer.vars['out']]
 
-    def verify_stability(self, threads=0, output_flag=1):
+    def verify_stability(self, threads=0, output_flag=1, ideal_cuts=False):
         if len(self.problems) != 2:
             raise Exception('Number of problems must be 2.')
         if not isinstance(self.problems[0], QPLayer) or not isinstance(self.problems[0].problem, MPCProblem):
@@ -100,7 +122,7 @@ class Verifier:
         reduced_objective_problem.problem = types.MethodType(problem_patch, reduced_objective_problem)
 
         reduced_objective_mpc_layer = QPLayer(reduced_objective_problem, 1)
-        reduced_objective_mpc_layer.compute_bounds(Bound.INT_ARITHMETIC, self.input_layer)
+        reduced_objective_mpc_layer.compute_bounds(BoundArithmetic.INT_ARITHMETIC, self.input_layer)
 
         self.input_layer.add_vars(model)
         self.problems[0].add_vars(model, only_primal=True)
@@ -133,7 +155,10 @@ class Verifier:
 
         model.setObjective(obj, GRB.MINIMIZE)
         model.update()
-        model.optimize()
+        if ideal_cuts:
+            model.optimize(self.get_callback())
+        else:
+            model.optimize()
 
         return model.objBound, [p.x for p in self.input_layer.vars['out']]
 

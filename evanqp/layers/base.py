@@ -3,7 +3,7 @@ from gurobipy import GRB
 from enum import Enum
 
 
-class Bound(Enum):
+class BoundArithmetic(Enum):
     INT_ARITHMETIC = 0
     ZONO_ARITHMETIC = 1
 
@@ -28,3 +28,6 @@ class BaseLayer:
 
     def compute_bounds(self, method, p_layer):
         pass
+
+    def compute_ideal_cuts(self, model, p_layer, pp_layer):
+        return []

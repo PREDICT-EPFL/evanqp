@@ -4,7 +4,7 @@ import scipy.sparse as sp
 from gurobipy import GRB, LinExpr, Model
 
 from evanqp import Box
-from evanqp.layers import Bound, BaseLayer, InputLayer
+from evanqp.layers import BoundArithmetic, BaseLayer, InputLayer
 from evanqp.zonotope import Zonotope
 
 
@@ -130,7 +130,7 @@ class QPLayer(BaseLayer):
 
         self.vars = old_vars
 
-        if method == Bound.ZONO_ARITHMETIC:
+        if method == BoundArithmetic.ZONO_ARITHMETIC:
             self.zono_bounds['out'] = Zonotope.zonotope_from_box(self.bounds['out']['lb'], self.bounds['out']['ub'])
 
     @staticmethod
