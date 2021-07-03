@@ -68,7 +68,14 @@ class Verifier:
                             model.cbCut(lhs <= rhs)
         return _callback
 
-    def find_max_abs_diff(self, threads=0, output_flag=1, ideal_cuts=False):
+    def warm_start(self, guess=None):
+        if guess is None:
+            guess = self.input_layer.forward(None)
+
+        for problem in self.problems:
+            problem.forward(guess, warm_start=True)
+
+    def find_max_abs_diff(self, threads=0, output_flag=1, ideal_cuts=False, warm_start=True, guess=None):
         model = Model()
         model.setParam('OutputFlag', output_flag)
         model.setParam('Threads', threads)
@@ -79,6 +86,8 @@ class Verifier:
             raise Exception('Problems do not have the same output size')
 
         self.setup_milp(model)
+        if warm_start:
+            self.warm_start(guess)
 
         diff = [model.addVar(vtype=GRB.CONTINUOUS) for _ in range(self.problems[0].out_size)]
         abs_diff = [model.addVar(vtype=GRB.CONTINUOUS) for _ in range(self.problems[0].out_size)]
@@ -97,7 +106,7 @@ class Verifier:
 
         return model.objBound, [p.x for p in self.input_layer.vars['out']]
 
-    def verify_stability(self, threads=0, output_flag=1, ideal_cuts=False):
+    def verify_stability(self, threads=0, output_flag=1, ideal_cuts=False, warm_start=True, guess=None):
         if len(self.problems) != 2:
             raise Exception('Number of problems must be 2.')
         if not isinstance(self.problems[0], QPLayer) or not isinstance(self.problems[0].problem, MPCProblem):
@@ -140,6 +149,9 @@ class Verifier:
             model.addConstr(reduced_objective_mpc_layer.vars['out'][i] == self.problems[1].vars['out'][i])
         model.update()
 
+        if warm_start:
+            self.warm_start(guess)
+
         x = self.problems[0].vars['x']
         x_t = reduced_objective_mpc_layer.vars['x']
 
@@ -162,7 +174,7 @@ class Verifier:
 
         return model.objBound, [p.x for p in self.input_layer.vars['out']]
 
-    def variables_in_polytope(self, poly, eps=1e-6, threads=0, output_flag=1):
+    def variables_in_polytope(self, poly, eps=1e-6, threads=0, output_flag=1, warm_start=True, guess=None):
         if len(self.problems) != 1:
             raise Exception('Number of problems must be 1.')
         if not isinstance(poly, Polytope):
@@ -175,6 +187,8 @@ class Verifier:
         model.setParam('Threads', threads)
 
         self.setup_milp(model)
+        if warm_start:
+            self.warm_start(guess)
 
         for i in range(self.problems[0].out_size):
             model.setObjective(LinExpr(poly.A[i, :], self.problems[0].vars['out']) - poly.b[i], GRB.MAXIMIZE)
@@ -187,12 +201,12 @@ class Verifier:
         return True
 
     @staticmethod
-    def min_optimal_mpc_horizon(parameter_set, mpc_factory, poly, eps=1e-6, threads=0):
+    def min_optimal_mpc_horizon(parameter_set, mpc_factory, poly, eps=1e-6, threads=0, warm_start=True, guess=None):
         N = 1
         mpc_problem = mpc_factory(N)
         print(f'Checking N = {N}')
         verifier = Verifier(parameter_set, mpc_problem)
-        res = verifier.variables_in_polytope(poly, eps=eps, threads=threads, output_flag=0)
+        res = verifier.variables_in_polytope(poly, eps=eps, threads=threads, output_flag=0, warm_start=warm_start, guess=guess)
         if res:
             return N
 

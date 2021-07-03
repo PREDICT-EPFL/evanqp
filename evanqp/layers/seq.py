@@ -55,3 +55,8 @@ class SeqLayer(BaseLayer):
                 raise NotImplementedError(f'Pytorch Layer {layer} not supported.')
 
         return SeqLayer(layers, start_depth)
+
+    def forward(self, x, warm_start=False):
+        for layer in self.layers:
+            x = layer.forward(x, warm_start=warm_start)
+        return x

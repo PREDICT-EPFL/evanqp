@@ -1,10 +1,17 @@
+from abc import ABC, abstractmethod
 import cvxpy as cp
 import numpy as np
 import scipy
 
+from evanqp.utils import cheby_center
 
-class Set:
-    pass
+
+class Set(ABC):
+    @abstractmethod
+    def sample(self):
+        """Draws a deterministic sample from the set
+        """
+        pass
 
 
 class Polytope(Set):
@@ -13,6 +20,10 @@ class Polytope(Set):
         self.A = A
         self.b = b
         self._bounding_box = None
+
+    def sample(self):
+        c, r = cheby_center(self.A, self.b)
+        return c
 
     def bounding_box(self):
         if self._bounding_box is not None:
@@ -47,6 +58,9 @@ class Box(Set):
     def __init__(self, lb, ub):
         self.lb = lb
         self.ub = ub
+
+    def sample(self):
+        return (self.lb + self.ub) / 2
 
     def as_polytope(self):
         n = self.lb.shape[0]

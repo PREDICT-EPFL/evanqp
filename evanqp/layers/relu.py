@@ -108,3 +108,10 @@ class ReluLayer(BaseLayer):
                 ineqs.append((self.vars['out'][neuron], rhs))
 
         return ineqs
+
+    def forward(self, x, warm_start=False):
+        if warm_start:
+            for i in range(self.out_size):
+                self.vars['r'][i].Start = 0 if x[i] <= 0 else 1
+
+        return np.clip(x, 0, None)

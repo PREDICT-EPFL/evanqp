@@ -1,3 +1,4 @@
+from abc import ABC, abstractmethod
 import numpy as np
 from gurobipy import GRB
 from enum import Enum
@@ -8,7 +9,7 @@ class BoundArithmetic(Enum):
     ZONO_ARITHMETIC = 1
 
 
-class BaseLayer:
+class BaseLayer(ABC):
 
     def __init__(self, out_size, depth):
         self.vars = {'out': []}
@@ -23,11 +24,17 @@ class BaseLayer:
                                          ub=self.bounds['out']['ub'][i] if self.bounds['out']['ub'].size > 0 else GRB.INFINITY)
                             for i in range(self.out_size)]
 
+    @abstractmethod
     def add_constr(self, model, p_layer):
         pass
 
+    @abstractmethod
     def compute_bounds(self, method, p_layer):
         pass
 
     def compute_ideal_cuts(self, model, p_layer, pp_layer):
         return []
+
+    @abstractmethod
+    def forward(self, x, warm_start=False):
+        pass

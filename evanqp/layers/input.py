@@ -34,3 +34,6 @@ class InputLayer(BaseLayer):
 
         if method == BoundArithmetic.ZONO_ARITHMETIC:
             self.zono_bounds['out'] = Zonotope.zonotope_from_box(self.bounds['out']['lb'], self.bounds['out']['ub'])
+
+    def forward(self, x, warm_start=False):
+        return self.input_set.sample()

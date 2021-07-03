@@ -37,3 +37,6 @@ class LinearLayer(BaseLayer):
         lb, ub = self.zono_bounds['out'].concretize()
         self.bounds['out']['lb'] = np.maximum(self.bounds['out']['lb'], lb)
         self.bounds['out']['ub'] = np.minimum(self.bounds['out']['ub'], ub)
+
+    def forward(self, x, warm_start=False):
+        return self.weight @ x + self.bias
