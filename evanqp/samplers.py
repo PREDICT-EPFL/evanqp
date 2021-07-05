@@ -2,15 +2,15 @@ import numpy as np
 from tqdm import tqdm
 
 from evanqp.sets import Polytope, Box
-from evanqp.problems import QPProblem
+from evanqp.problems import CvxpyProblem
 from evanqp.utils import cprnd
 
 
 class RandomSampler:
 
     def __init__(self, problem, parameter_set):
-        if not isinstance(problem, QPProblem):
-            raise Exception('problem must be of type QPProblem')
+        if not isinstance(problem, CvxpyProblem):
+            raise Exception('problem must be of type CvxpyProblem')
 
         self.problem = problem
         self.parameter_set = parameter_set

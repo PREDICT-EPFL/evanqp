@@ -3,7 +3,7 @@ from typing import List, Union
 import cvxpy as cp
 
 
-class QPProblem(ABC):
+class CvxpyProblem(ABC):
 
     @abstractmethod
     def problem(self) -> cp.Problem:
@@ -21,14 +21,14 @@ class QPProblem(ABC):
     def solve(self, *args) -> dict:
         pass
 
-    def parameter_size(self):
+    def parameter_size(self) -> int:
         return sum([v.size for v in self.parameters()])
 
-    def variable_size(self):
+    def variable_size(self) -> int:
         return sum([v.size for v in self.variables()])
 
 
-class MPCProblem(QPProblem):
+class MPCProblem(CvxpyProblem):
 
     @abstractmethod
     def reduced_objective(self) -> Union[cp.Minimize, cp.Maximize]:

@@ -7,7 +7,7 @@ from gurobipy import GRB, Model, LinExpr, abs_, max_
 from copy import copy
 
 from evanqp import Polytope
-from evanqp.problems import QPProblem, MPCProblem
+from evanqp.problems import CvxpyProblem, MPCProblem
 from evanqp.layers import BoundArithmetic, InputLayer, QPLayer, SeqLayer
 
 
@@ -18,7 +18,7 @@ class Verifier:
 
         self.problems = []
         for problem in problems:
-            if isinstance(problem, QPProblem):
+            if isinstance(problem, CvxpyProblem):
                 self.problems.append(QPLayer(problem, 1))
             else:
                 self.problems.append(SeqLayer.from_pytorch(problem))
@@ -109,7 +109,7 @@ class Verifier:
     def verify_stability(self, threads=0, output_flag=1, ideal_cuts=False, warm_start=True, guess=None):
         if len(self.problems) != 2:
             raise Exception('Number of problems must be 2.')
-        if not isinstance(self.problems[0], QPLayer) or not isinstance(self.problems[0].problem, MPCProblem):
+        if not isinstance(self.problems[0].problem, MPCProblem):
             raise Exception('The first problem must be of type MPCProblem.')
 
         mpc_problem = self.problems[0].problem
@@ -117,7 +117,6 @@ class Verifier:
         model = Model()
         model.setParam('OutputFlag', output_flag)
         model.setParam('Threads', threads)
-        model.setParam('NonConvex', 2)  # allow non-convex MIQP formulation
 
         if not self.bounds_calculated:
             self.compute_bounds()
@@ -164,6 +163,10 @@ class Verifier:
         for i, j, Pij in zip(P_t_row_idx, P_t_col_idx, P_t_col_coef):
             obj -= 0.5 * x_t[i] * Pij * x_t[j]
         obj -= LinExpr(reduced_objective_mpc_layer.q, x_t)
+
+        # allow non-convex MIQP formulation
+        if len(P_t_col_coef) > 0:
+            model.setParam('NonConvex', 2)
 
         model.setObjective(obj, GRB.MINIMIZE)
         model.update()
