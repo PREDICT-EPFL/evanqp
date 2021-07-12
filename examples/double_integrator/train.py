@@ -85,6 +85,10 @@ def main():
                         help='input batch size for testing (default: 1000)')
     parser.add_argument('--train-set-ratio', type=float, default=0.8, metavar='M',
                         help='Portion of dataset used for training (default: 0.8)')
+    parser.add_argument('--parameter-samples-file-name', type=str, default='parameter_samples.pt', metavar='S',
+                        help='parameter samples file name')
+    parser.add_argument('--variable-samples-file-name', type=str, default='variable_samples.pt', metavar='S',
+                        help='variable samples file name')
     parser.add_argument('--epochs', type=int, default=100, metavar='N',
                         help='number of epochs to train (default: 100)')
     parser.add_argument('--lr', type=float, default=0.1, metavar='LR',
@@ -100,7 +104,9 @@ def main():
     parser.add_argument('--log-interval', type=int, default=10, metavar='N',
                         help='how many batches to wait before logging training status')
     parser.add_argument('--save-model', action='store_true', default=True,
-                        help='For Saving the current Model')
+                        help='for Saving the current Model')
+    parser.add_argument('--model-file-name', type=str, default='double_integrator_ffnn.pt', metavar='S',
+                        help='file name to save the model to')
     parser.add_argument('--tensorboard', action='store_true', default=False,
                         help='save training statistics for tensorboard')
     args = parser.parse_args()
@@ -120,8 +126,8 @@ def main():
         train_kwargs.update(cuda_kwargs)
         test_kwargs.update(cuda_kwargs)
 
-    parameter_samples = torch.load('parameter_samples.pt')
-    variable_samples = torch.load('variable_samples.pt')
+    parameter_samples = torch.load(args.parameter_samples_file_name)
+    variable_samples = torch.load(args.variable_samples_file_name)
     dataset = DoubleIntegratorDataset(parameter_samples, variable_samples)
     train_set_size = int(len(dataset) * args.train_set_ratio)
     test_set_size = len(dataset) - train_set_size
@@ -160,7 +166,7 @@ def main():
             'depth': depth,
             'hidden_size': hidden_size,
             'state_dict': model.state_dict(),
-        }, 'double_integrator_ffnn.pt')
+        }, args.model_file_name)
 
 
 if __name__ == '__main__':
