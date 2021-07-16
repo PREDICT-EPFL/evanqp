@@ -86,8 +86,8 @@ class Verifier:
         if warm_start:
             self.warm_start(guess)
 
-        diff = [model.addVar(vtype=GRB.CONTINUOUS) for _ in range(self.problems[0].out_size)]
-        abs_diff = [model.addVar(vtype=GRB.CONTINUOUS) for _ in range(self.problems[0].out_size)]
+        diff = [model.addVar(vtype=GRB.CONTINUOUS, lb=-GRB.INFINITY, ub=GRB.INFINITY) for _ in range(self.problems[0].out_size)]
+        abs_diff = [model.addVar(vtype=GRB.CONTINUOUS, lb=0, ub=GRB.INFINITY) for _ in range(self.problems[0].out_size)]
         for i in range(self.problems[0].out_size):
             model.addConstr(diff[i] == self.problems[0].vars['out'][i] - self.problems[1].vars['out'][i])
             model.addConstr(abs_diff[i] == abs_(diff[i]))
