@@ -3,6 +3,7 @@ import cvxpy as cp
 import numpy as np
 import scipy.sparse as sp
 from gurobipy import GRB, LinExpr, Model
+from tqdm import trange
 
 from evanqp import Box
 from evanqp.layers import BoundArithmetic, BaseLayer, ConstLayer, InputLayer
@@ -35,7 +36,7 @@ class QPLayer(BaseLayer):
 
         if not only_primal:
             self.vars['mu'] = [model.addVar(vtype=GRB.CONTINUOUS, lb=-GRB.INFINITY, ub=GRB.INFINITY) for _ in range(self.A.shape[0] + self.problem.parameter_size())]
-            self.vars['lam'] = [model.addVar(vtype=GRB.CONTINUOUS, lb=0, ub=GRB.INFINITY) for _ in range(self.F.shape[0])]
+            self.vars['lam'] = [model.addVar(vtype=GRB.CONTINUOUS, lb=0, ub=self.big_m[i]) for i in range(self.F.shape[0])]
             self.vars['r'] = [model.addVar(vtype=GRB.BINARY) for _ in range(self.F.shape[0])]
         else:
             if 'mu' in self.vars:
@@ -92,11 +93,12 @@ class QPLayer(BaseLayer):
 
             for i in range(self.F.shape[0]):
                 _, F_col_idx, F_col_coef = sp.find(self.F[i, :])
-                if 0 >= ineq_lb[i] >= -GRB.INFINITY:
+                if 0 >= ineq_lb[i] > -1e-3 * GRB.INFINITY:
                     model.addConstr(LinExpr(F_col_coef, [self.vars['x'][j] for j in F_col_idx]) - self.g[i] >= self.vars['r'][i] * ineq_lb[i])
                 model.addConstr((self.vars['r'][i] == 0) >> (LinExpr(F_col_coef, [self.vars['x'][j] for j in F_col_idx]) - self.g[i] == 0))
 
-                # model.addConstr(self.vars['lam'][i] <= (1 - self.vars['r'][i]) * self.big_m[i])
+                if self.big_m[i] < GRB.INFINITY:
+                    model.addConstr(self.vars['lam'][i] <= (1 - self.vars['r'][i]) * self.big_m[i])
                 model.addConstr((self.vars['r'][i] == 1) >> (self.vars['lam'][i] == 0))
 
         i = 0
@@ -107,46 +109,8 @@ class QPLayer(BaseLayer):
                 model.addConstr(self.vars['out'][i] == self.vars['x'][idx + k])
                 i += 1
 
-    def compute_bounds(self, method, p_layer):
+    def compute_bounds(self, method, p_layer, time_limit=1, only_output=False):
         # add bounds from previous layer as constraints
-        F_par = np.zeros((2 * self.problem.parameter_size(), self.F.shape[1]))
-        g_par = np.zeros(2 * self.problem.parameter_size())
-        i = 0
-        for j in range(len(self.problem.parameters())):
-            idx = self.var_id_to_col[self.problem.parameters()[j].id]
-            size = self.problem.parameters()[j].size
-            for k in range(size):
-                F_par[i, idx + k] = -1
-                g_par[i] = -p_layer.bounds['out']['lb'][i]
-                F_par[i + 1, idx + k] = 1
-                g_par[i + 1] = p_layer.bounds['out']['ub'][i]
-                i += 1
-        F_full = sp.vstack((self.F, F_par), format='csc')
-        g_full = np.concatenate((self.g, g_par))
-
-        # compute bounds on primal variables
-        self.lb, self.ub = self.prep_bound(method, p_layer)
-
-        # save parameter bounds for next layer
-        self.bounds['out']['lb'] = -GRB.INFINITY * np.ones(self.problem.variable_size())
-        self.bounds['out']['ub'] = GRB.INFINITY * np.ones(self.problem.variable_size())
-        i = 0
-        for j in range(len(self.problem.variables())):
-            idx = self.var_id_to_col[self.problem.variables()[j].id]
-            size = self.problem.variables()[j].size
-            self.bounds['out']['lb'][i:i+size] = self.lb[idx:idx+size]
-            self.bounds['out']['ub'][i:i+size] = self.ub[idx:idx+size]
-            i += size
-
-        if method == BoundArithmetic.ZONO_ARITHMETIC:
-            self.zono_bounds['out'] = Zonotope.zonotope_from_box(self.bounds['out']['lb'], self.bounds['out']['ub'])
-
-        # compute upper bound for the dual variables
-        # self.big_m = QPLayer.dual_bounds(self.P, self.q, self.A, self.b, self.F, self.g, self.lb, self.ub)
-
-    def prep_bound(self, method, p_layer, time_limit=1):
-        """Compute bounds for primal variables
-        """
         model = Model()
         model.setParam('OutputFlag', 0)
         model.setParam('TimeLimit', time_limit)
@@ -160,75 +124,75 @@ class QPLayer(BaseLayer):
         model.update()
 
         old_vars = self.vars
-
         self.vars = {'out': []}
+
         self.bounds['out']['lb'] = np.array([-GRB.INFINITY for _ in range(self.out_size)])
         self.bounds['out']['ub'] = np.array([GRB.INFINITY for _ in range(self.out_size)])
         self.lb = -GRB.INFINITY * np.ones(self.A.shape[1])
         self.ub = GRB.INFINITY * np.ones(self.A.shape[1])
+        self.big_m = GRB.INFINITY * np.ones(self.F.shape[0])
+
         self.add_vars(model)
         model.update()
         self.add_constr(model, input_layer)
         model.update()
 
-        lb = -GRB.INFINITY * np.ones(self.A.shape[1])
-        ub = GRB.INFINITY * np.ones(self.A.shape[1])
+        if not only_output:
+            for i in trange(self.A.shape[1], desc='QP Primal Bound'):
+                model.setObjective(self.vars['x'][i], GRB.MINIMIZE)
+                model.update()
+                model.optimize()
+                self.lb[i] = model.objBound
+                if self.lb[i] == -GRB.INFINITY:
+                    warnings.warn('QP Problem primal variables are not lower bounded.')
 
-        for i in range(self.A.shape[1]):
-            model.setObjective(self.vars['x'][i], GRB.MINIMIZE)
-            model.update()
-            model.optimize()
-            lb[i] = model.objBound
-            if lb[i] == -GRB.INFINITY:
-                warnings.warn('QP Problem is not lower bounded.')
+                model.setObjective(self.vars['x'][i], GRB.MAXIMIZE)
+                model.update()
+                model.optimize()
+                self.ub[i] = model.objBound
+                if self.ub[i] == GRB.INFINITY:
+                    warnings.warn('QP Problem primal variables are not upper bounded.')
 
-            model.setObjective(self.vars['x'][i], GRB.MAXIMIZE)
-            model.update()
-            model.optimize()
-            ub[i] = model.objBound
-            if ub[i] == GRB.INFINITY:
-                warnings.warn('QP Problem is not upper bounded.')
+            for i in trange(self.F.shape[0], desc='QP Dual Bound'):
+                model.setObjective(self.vars['lam'][i], GRB.MAXIMIZE)
+                model.update()
+                model.optimize()
+                self.big_m[i] = model.objBound
+                if self.big_m[i] == GRB.INFINITY:
+                    warnings.warn('QP Problem dual is not upper bounded.')
+
+        # save parameter bounds for next layer
+        self.bounds['out']['lb'] = -GRB.INFINITY * np.ones(self.problem.variable_size())
+        self.bounds['out']['ub'] = GRB.INFINITY * np.ones(self.problem.variable_size())
+        i = 0
+        for j in range(len(self.problem.variables())):
+            idx = self.var_id_to_col[self.problem.variables()[j].id]
+            size = self.problem.variables()[j].size
+
+            if only_output:
+                for k in range(size):
+                    model.setObjective(self.vars['x'][idx + k], GRB.MINIMIZE)
+                    model.update()
+                    model.optimize()
+                    self.lb[idx + k] = model.objBound
+                    if self.lb[idx + k] == -GRB.INFINITY:
+                        warnings.warn('QP Problem primal variables are not lower bounded.')
+
+                    model.setObjective(self.vars['x'][idx + k], GRB.MAXIMIZE)
+                    model.update()
+                    model.optimize()
+                    self.ub[idx + k] = model.objBound
+                    if self.ub[idx + k] == GRB.INFINITY:
+                        warnings.warn('QP Problem primal variables are not upper bounded.')
+
+            self.bounds['out']['lb'][i:i+size] = self.lb[idx:idx+size]
+            self.bounds['out']['ub'][i:i+size] = self.ub[idx:idx+size]
+            i += size
+
+        if method == BoundArithmetic.ZONO_ARITHMETIC:
+            self.zono_bounds['out'] = Zonotope.zonotope_from_box(self.bounds['out']['lb'], self.bounds['out']['ub'])
 
         self.vars = old_vars
-
-        return lb, ub
-
-    @staticmethod
-    def dual_bounds(P, q, A, b, F, g, lb, ub):
-        """Calculate dual variable bounds for inequalities (TODO: not working)
-        """
-
-        model = Model()
-        model.setParam('OutputFlag', 0)
-        model.setParam('NonConvex', 2)
-
-        x = model.addMVar(A.shape[1], lb=lb, ub=ub)
-        # X = model.addMVar(A.shape[1] * A.shape[1], lb=np.outer(lb, lb).flatten('F'), ub=np.outer(ub, ub).flatten('F'))
-        mu = model.addMVar(A.shape[0], lb=-GRB.INFINITY, ub=GRB.INFINITY)
-        lam = model.addMVar(F.shape[0], lb=0, ub=GRB.INFINITY)
-        model.update()
-
-        # primal
-        model.addConstr(A @ x == b)
-        model.addConstr(F @ x <= g)
-        # normal KKT
-        model.addConstr(P @ x + q + A.T @ mu + F.T @ lam == 0)
-        # quadratic KKT
-        model.addConstr(x @ P @ x + q @ x + b @ mu + g @ lam == 0)
-        model.update()
-
-        big_m = GRB.INFINITY * np.ones(F.shape[0])
-
-        for i in range(F.shape[0]):
-            model.setObjective(lam[i], GRB.MAXIMIZE)
-            model.update()
-            model.optimize()
-            if model.Status == GRB.OPTIMAL or model.Status == GRB.SUBOPTIMAL:
-                big_m[i] = model.objBound
-            else:
-                warnings.warn('QP Problem dual variables are not upper bounded, could lead to increased solve times.')
-
-        return big_m
 
     @staticmethod
     def replace_params(expr, param_dic):
