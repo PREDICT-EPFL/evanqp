@@ -20,9 +20,9 @@ class SeqLayer(BaseLayer):
             layer.add_constr(model, p_layer)
             p_layer = layer
 
-    def compute_bounds(self, method, p_layer):
+    def compute_bounds(self, method, p_layer, **kwargs):
         for layer in self.layers:
-            layer.compute_bounds(method, p_layer)
+            layer.compute_bounds(method, p_layer, **kwargs)
             p_layer = layer
         self.bounds = self.layers[-1].bounds
         self.zono_bounds = self.layers[-1].zono_bounds

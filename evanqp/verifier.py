@@ -25,10 +25,10 @@ class Verifier:
 
         self.bounds_calculated = False
 
-    def compute_bounds(self, method=BoundArithmetic.ZONO_ARITHMETIC):
-        self.input_layer.compute_bounds(method)
+    def compute_bounds(self, method=BoundArithmetic.ZONO_ARITHMETIC, **kwargs):
+        self.input_layer.compute_bounds(method, **kwargs)
         for p in self.problems:
-            p.compute_bounds(method, self.input_layer)
+            p.compute_bounds(method, self.input_layer, **kwargs)
         self.bounds_calculated = True
 
         return [p.bounds['out'] for p in self.problems]
@@ -53,7 +53,7 @@ class Verifier:
             p.add_constr(model, self.input_layer)
         model.update()
 
-    def get_callback(self):
+    def ideal_cuts_callback(self):
         def _callback(model, where):
             if where == GRB.Callback.MIPNODE:
                 if model.cbGet(GRB.Callback.MIPNODE_STATUS) == GRB.Status.OPTIMAL:
@@ -97,7 +97,7 @@ class Verifier:
         model.setObjective(max_abs_diff, GRB.MAXIMIZE)
         model.update()
         if ideal_cuts:
-            model.optimize(self.get_callback())
+            model.optimize(self.ideal_cuts_callback())
         else:
             model.optimize()
 
@@ -168,7 +168,7 @@ class Verifier:
         model.setObjective(obj, GRB.MINIMIZE)
         model.update()
         if ideal_cuts:
-            model.optimize(self.get_callback())
+            model.optimize(self.ideal_cuts_callback())
         else:
             model.optimize()
 

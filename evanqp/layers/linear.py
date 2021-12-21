@@ -16,7 +16,7 @@ class LinearLayer(BaseLayer):
         for i in range(self.out_size):
             model.addConstr(self.vars['out'][i] == LinExpr(self.weight[i, :], p_layer.vars['out']) + self.bias[i])
 
-    def compute_bounds(self, method, p_layer):
+    def compute_bounds(self, method, p_layer, **kwargs):
         if method == BoundArithmetic.INT_ARITHMETIC:
             self._compute_bounds_ia(p_layer)
         elif method == BoundArithmetic.ZONO_ARITHMETIC:

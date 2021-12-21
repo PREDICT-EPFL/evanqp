@@ -12,7 +12,7 @@ class ConstLayer(BaseLayer):
         for i in range(self.out_size):
             model.addConstr(self.vars['out'][i] == self.x[i])
 
-    def compute_bounds(self, method, p_layer=None):
+    def compute_bounds(self, method, p_layer=None, **kwargs):
         self.bounds['out']['lb'] = self.x
         self.bounds['out']['ub'] = self.x
 

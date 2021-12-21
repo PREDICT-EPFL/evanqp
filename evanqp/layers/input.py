@@ -24,7 +24,7 @@ class InputLayer(BaseLayer):
             for i in range(A.shape[0]):
                 model.addConstr(LinExpr(A[i, :], self.vars['out']) <= b[i])
 
-    def compute_bounds(self, method, p_layer=None):
+    def compute_bounds(self, method, p_layer=None, **kwargs):
         if isinstance(self.input_set, Polytope):
             self.bounds['out']['lb'] = self.input_set.bounding_box().lb
             self.bounds['out']['ub'] = self.input_set.bounding_box().ub

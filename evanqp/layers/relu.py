@@ -34,7 +34,7 @@ class ReluLayer(BaseLayer):
                     model.addConstr((self.vars['r'][i] == 1) >> (p_layer.vars['out'][i] >= 0))
                     model.addConstr((self.vars['r'][i] == 0) >> (p_layer.vars['out'][i] <= 0))
 
-    def compute_bounds(self, method, p_layer):
+    def compute_bounds(self, method, p_layer, **kwargs):
         if method == BoundArithmetic.INT_ARITHMETIC:
             self._compute_bounds_ia(p_layer)
         elif method == BoundArithmetic.ZONO_ARITHMETIC:

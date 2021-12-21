@@ -25,6 +25,9 @@ class Polytope(Set):
         c, r = cheby_center(self.A, self.b)
         return c
 
+    def as_polytope(self):
+        return self
+
     def bounding_box(self):
         if self._bounding_box is not None:
             return self._bounding_box

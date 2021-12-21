@@ -27,7 +27,8 @@ class QPLayer(BaseLayer):
 
         self.lb = None
         self.ub = None
-        self.big_m = None
+        self.big_m_ineq = None
+        self.big_m_lam = None
 
     def add_vars(self, model, only_primal=False):
         super().add_vars(model)
@@ -36,7 +37,7 @@ class QPLayer(BaseLayer):
 
         if not only_primal:
             self.vars['mu'] = [model.addVar(vtype=GRB.CONTINUOUS, lb=-GRB.INFINITY, ub=GRB.INFINITY) for _ in range(self.A.shape[0] + self.problem.parameter_size())]
-            self.vars['lam'] = [model.addVar(vtype=GRB.CONTINUOUS, lb=0, ub=self.big_m[i]) for i in range(self.F.shape[0])]
+            self.vars['lam'] = [model.addVar(vtype=GRB.CONTINUOUS, lb=0, ub=self.big_m_lam[i]) for i in range(self.F.shape[0])]
             self.vars['r'] = [model.addVar(vtype=GRB.BINARY) for _ in range(self.F.shape[0])]
         else:
             if 'mu' in self.vars:
@@ -46,7 +47,7 @@ class QPLayer(BaseLayer):
             if 'r' in self.vars:
                 del self.vars['r']
 
-    def add_constr(self, model, p_layer, only_primal=False):
+    def add_constr(self, model, p_layer, only_primal=False, without_compl=False):
         # add previous layer as equality constraint
         A_par = np.zeros((self.problem.parameter_size(), self.A.shape[1]))
         b_par = np.zeros(self.problem.parameter_size(), dtype=object)
@@ -85,20 +86,15 @@ class QPLayer(BaseLayer):
             model.addConstr(LinExpr(F_col_coef, [self.vars['x'][j] for j in F_col_idx]) - self.g[i] <= 0)
 
         # (F_i @ x - g_i) * lam_i = 0
-        if not only_primal:
-            # lower bound for inequality
-            F_p = self.F.multiply(self.F > 0)
-            F_m = self.F.multiply(self.F < 0)
-            ineq_lb = F_m @ self.ub + F_p @ self.lb - self.g
-
+        if not only_primal and not without_compl:
             for i in range(self.F.shape[0]):
                 _, F_col_idx, F_col_coef = sp.find(self.F[i, :])
-                if 0 >= ineq_lb[i] > -1e-3 * GRB.INFINITY:
-                    model.addConstr(LinExpr(F_col_coef, [self.vars['x'][j] for j in F_col_idx]) - self.g[i] >= self.vars['r'][i] * ineq_lb[i])
+                if self.big_m_ineq[i] < GRB.INFINITY:
+                    model.addConstr(self.g[i] - LinExpr(F_col_coef, [self.vars['x'][j] for j in F_col_idx]) <= self.vars['r'][i] * self.big_m_ineq[i])
                 model.addConstr((self.vars['r'][i] == 0) >> (LinExpr(F_col_coef, [self.vars['x'][j] for j in F_col_idx]) - self.g[i] == 0))
 
-                if self.big_m[i] < GRB.INFINITY:
-                    model.addConstr(self.vars['lam'][i] <= (1 - self.vars['r'][i]) * self.big_m[i])
+                if self.big_m_lam[i] < GRB.INFINITY:
+                    model.addConstr(self.vars['lam'][i] <= (1 - self.vars['r'][i]) * self.big_m_lam[i])
                 model.addConstr((self.vars['r'][i] == 1) >> (self.vars['lam'][i] == 0))
 
         i = 0
@@ -109,7 +105,7 @@ class QPLayer(BaseLayer):
                 model.addConstr(self.vars['out'][i] == self.vars['x'][idx + k])
                 i += 1
 
-    def compute_bounds(self, method, p_layer, time_limit=1, only_output=False):
+    def compute_bounds(self, method, p_layer, mip=False, time_limit=1, with_output=True,  **kwargs):
         # add bounds from previous layer as constraints
         model = Model()
         model.setParam('OutputFlag', 0)
@@ -117,7 +113,7 @@ class QPLayer(BaseLayer):
 
         input_set = Box(p_layer.bounds['out']['lb'], p_layer.bounds['out']['ub'])
         input_layer = InputLayer(input_set)
-        input_layer.compute_bounds(method)
+        input_layer.compute_bounds(method, **kwargs)
         input_layer.add_vars(model)
         model.update()
         input_layer.add_constr(model)
@@ -128,66 +124,55 @@ class QPLayer(BaseLayer):
 
         self.bounds['out']['lb'] = np.array([-GRB.INFINITY for _ in range(self.out_size)])
         self.bounds['out']['ub'] = np.array([GRB.INFINITY for _ in range(self.out_size)])
+
         self.lb = -GRB.INFINITY * np.ones(self.A.shape[1])
         self.ub = GRB.INFINITY * np.ones(self.A.shape[1])
-        self.big_m = GRB.INFINITY * np.ones(self.F.shape[0])
+
+        self.big_m_ineq = GRB.INFINITY * np.ones(self.F.shape[0])
+        self.big_m_lam = GRB.INFINITY * np.ones(self.F.shape[0])
 
         self.add_vars(model)
         model.update()
-        self.add_constr(model, input_layer)
+        self.add_constr(model, input_layer, without_compl=(not mip))
         model.update()
 
-        if not only_output:
-            for i in trange(self.A.shape[1], desc='QP Primal Bound'):
-                model.setObjective(self.vars['x'][i], GRB.MINIMIZE)
-                model.update()
-                model.optimize()
-                self.lb[i] = model.objBound
-                if self.lb[i] == -GRB.INFINITY:
-                    warnings.warn('QP Problem primal variables are not lower bounded.')
+        for i in trange(self.F.shape[0], desc='QP Ineq Bound'):
+            _, F_col_idx, F_col_coef = sp.find(self.F[i, :])
+            model.setObjective(self.g[i] - LinExpr(F_col_coef, [self.vars['x'][j] for j in F_col_idx]), GRB.MAXIMIZE)
+            model.update()
+            model.optimize()
+            self.big_m_ineq[i] = model.objBound
 
-                model.setObjective(self.vars['x'][i], GRB.MAXIMIZE)
-                model.update()
-                model.optimize()
-                self.ub[i] = model.objBound
-                if self.ub[i] == GRB.INFINITY:
-                    warnings.warn('QP Problem primal variables are not upper bounded.')
+        for i in trange(self.F.shape[0], desc='QP Dual Bound'):
+            model.setObjective(self.vars['lam'][i], GRB.MAXIMIZE)
+            model.update()
+            model.optimize()
+            self.big_m_lam[i] = model.objBound
 
-            for i in trange(self.F.shape[0], desc='QP Dual Bound'):
-                model.setObjective(self.vars['lam'][i], GRB.MAXIMIZE)
-                model.update()
-                model.optimize()
-                self.big_m[i] = model.objBound
-                if self.big_m[i] == GRB.INFINITY:
-                    warnings.warn('QP Problem dual is not upper bounded.')
+        if with_output:
+            i = 0
+            for j in range(len(self.problem.variables())):
+                idx = self.var_id_to_col[self.problem.variables()[j].id]
+                size = self.problem.variables()[j].size
 
-        # save parameter bounds for next layer
-        self.bounds['out']['lb'] = -GRB.INFINITY * np.ones(self.problem.variable_size())
-        self.bounds['out']['ub'] = GRB.INFINITY * np.ones(self.problem.variable_size())
-        i = 0
-        for j in range(len(self.problem.variables())):
-            idx = self.var_id_to_col[self.problem.variables()[j].id]
-            size = self.problem.variables()[j].size
-
-            if only_output:
-                for k in range(size):
+                for k in trange(size, desc='QP Output Bound'):
                     model.setObjective(self.vars['x'][idx + k], GRB.MINIMIZE)
                     model.update()
                     model.optimize()
                     self.lb[idx + k] = model.objBound
                     if self.lb[idx + k] == -GRB.INFINITY:
-                        warnings.warn('QP Problem primal variables are not lower bounded.')
+                        warnings.warn('QP Problem output variables are not lower bounded. Consider adding explicit bounds.')
 
                     model.setObjective(self.vars['x'][idx + k], GRB.MAXIMIZE)
                     model.update()
                     model.optimize()
                     self.ub[idx + k] = model.objBound
                     if self.ub[idx + k] == GRB.INFINITY:
-                        warnings.warn('QP Problem primal variables are not upper bounded.')
+                        warnings.warn('QP Problem output variables are not upper bounded. Consider adding explicit bounds.')
 
-            self.bounds['out']['lb'][i:i+size] = self.lb[idx:idx+size]
-            self.bounds['out']['ub'][i:i+size] = self.ub[idx:idx+size]
-            i += size
+                self.bounds['out']['lb'][i:i+size] = self.lb[idx:idx+size]
+                self.bounds['out']['ub'][i:i+size] = self.ub[idx:idx+size]
+                i += size
 
         if method == BoundArithmetic.ZONO_ARITHMETIC:
             self.zono_bounds['out'] = Zonotope.zonotope_from_box(self.bounds['out']['lb'], self.bounds['out']['ub'])
@@ -195,39 +180,40 @@ class QPLayer(BaseLayer):
         self.vars = old_vars
 
     @staticmethod
-    def replace_params(expr, param_dic):
+    def replace_params(expr, param_to_placeholder, placeholder_to_param):
         for idx, arg in enumerate(expr.args):
             if isinstance(arg, cp.Parameter):
-                param_dic = QPLayer.replace_param(expr, idx, param_dic)
+                QPLayer.replace_param(expr, idx, param_to_placeholder, placeholder_to_param)
             else:
-                param_dic = QPLayer.replace_params(arg, param_dic)
-        return param_dic
+                QPLayer.replace_params(arg, param_to_placeholder, placeholder_to_param)
 
     @staticmethod
-    def replace_param(expr, idx, param_dic):
+    def replace_param(expr, idx, param_to_placeholder, placeholder_to_param):
         param = expr.args[idx]
-        placeholder = cp.Variable(param.shape, var_id=param.id, name=param.name())
-        expr.args[idx] = placeholder
-        param_dic[placeholder.id] = (expr, idx, param)
-        return param_dic
+        if param.id not in param_to_placeholder:
+            placeholder = cp.Variable(param.shape, var_id=param.id, name=param.name())
+            param_to_placeholder[param.id] = placeholder
+            placeholder_to_param[placeholder.id] = param
+        expr.args[idx] = param_to_placeholder[param.id]
 
     @staticmethod
-    def restore_params(expr, param_dic):
+    def restore_params(expr, placeholder_to_param):
         for idx, arg in enumerate(expr.args):
-            if isinstance(arg, cp.Variable) and arg.id in param_dic:
-                expr.args[idx] = param_dic[arg.id][2]
+            if isinstance(arg, cp.Variable) and arg.id in placeholder_to_param:
+                expr.args[idx] = placeholder_to_param[arg.id]
             else:
-                QPLayer.restore_params(arg, param_dic)
+                QPLayer.restore_params(arg, placeholder_to_param)
 
     @staticmethod
     def compile_qp_problem_with_params_as_variables(problem):
         objective = problem.objective
         constraints = problem.constraints
 
-        param_dic = {}
-        QPLayer.replace_params(objective, param_dic)
+        param_to_placeholder = {}
+        placeholder_to_param = {}
+        QPLayer.replace_params(objective, param_to_placeholder, placeholder_to_param)
         for con in constraints:
-            QPLayer.replace_params(con, param_dic)
+            QPLayer.replace_params(con, param_to_placeholder, placeholder_to_param)
         problem = cp.Problem(objective, constraints)
 
         data, chain, inverse_data = problem.get_problem_data(cp.OSQP)
@@ -240,9 +226,9 @@ class QPLayer(BaseLayer):
         F = data['F']
         g = data['G']
 
-        QPLayer.restore_params(objective, param_dic)
+        QPLayer.restore_params(objective, placeholder_to_param)
         for con in constraints:
-            QPLayer.restore_params(con, param_dic)
+            QPLayer.restore_params(con, placeholder_to_param)
 
         return P, q, A, b, F, g, compiler.var_id_to_col
 

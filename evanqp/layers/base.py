@@ -29,7 +29,7 @@ class BaseLayer(ABC):
         pass
 
     @abstractmethod
-    def compute_bounds(self, method, p_layer):
+    def compute_bounds(self, method, p_layer, **kwargs):
         pass
 
     def compute_ideal_cuts(self, model, p_layer, pp_layer):
