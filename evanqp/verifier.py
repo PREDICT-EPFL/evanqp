@@ -5,10 +5,11 @@ import cvxpy as cp
 import scipy.sparse as sp
 from gurobipy import GRB, Model, LinExpr, abs_, max_
 from copy import copy
+from tqdm import trange
 
 from evanqp import Polytope
 from evanqp.problems import CvxpyProblem, MPCProblem
-from evanqp.layers import BoundArithmetic, InputLayer, QPLayer, SeqLayer
+from evanqp.layers import BoundArithmetic, InputLayer, ConcatLayer, LinearLayer, QPLayer, SeqLayer
 
 
 class Verifier:
@@ -103,7 +104,7 @@ class Verifier:
 
         return model.objBound, [p.x for p in self.input_layer.vars['out']]
 
-    def verify_stability(self, threads=0, output_flag=1, ideal_cuts=False, warm_start=True, guess=None):
+    def verify_stability_sufficient(self, threads=0, output_flag=1, ideal_cuts=False, warm_start=True, guess=None):
         if len(self.problems) != 2:
             raise Exception('Number of problems must be 2.')
         if not isinstance(self.problems[0].problem, MPCProblem):
@@ -173,6 +174,137 @@ class Verifier:
             model.optimize()
 
         return model.objBound, [p.x for p in self.input_layer.vars['out']]
+
+    def verify_stability_direct(self, threads=0, output_flag=1, ideal_cuts=False, warm_start=True, guess=None):
+        if len(self.problems) != 2:
+            raise Exception('Number of problems must be 2.')
+        if not isinstance(self.problems[0].problem, MPCProblem):
+            raise Exception('The first problem must be of type MPCProblem.')
+
+        mpc_problem = self.problems[0].problem
+
+        model = Model()
+        model.setParam('OutputFlag', output_flag)
+        model.setParam('Threads', threads)
+
+        if not self.bounds_calculated:
+            self.compute_bounds()
+
+        x_u_layer = ConcatLayer(self.input_layer.out_size + self.problems[1].out_size, self.problems[1].depth + 1)
+        A, B = self.problems[0].problem.dynamics()
+        weight = np.hstack((A, B))
+        bias = np.zeros(weight.shape[0])
+        next_state_layer = LinearLayer(weight, bias, x_u_layer.depth + 1)
+        mpc_cost_next_state_layer = QPLayer(mpc_problem, next_state_layer.depth + 1)
+
+        x_u_layer.compute_bounds(BoundArithmetic.ZONO_ARITHMETIC, (self.input_layer, self.problems[1]))
+        next_state_layer.compute_bounds(BoundArithmetic.ZONO_ARITHMETIC, x_u_layer)
+        mpc_cost_next_state_layer.compute_bounds(BoundArithmetic.ZONO_ARITHMETIC, next_state_layer)
+
+        self.input_layer.add_vars(model)
+        self.problems[0].add_vars(model, only_primal=True)
+        self.problems[1].add_vars(model)
+        x_u_layer.add_vars(model)
+        next_state_layer.add_vars(model)
+        mpc_cost_next_state_layer.add_vars(model)
+        model.update()
+
+        self.input_layer.add_constr(model)
+        self.problems[0].add_constr(model, self.input_layer, only_primal=True)
+        self.problems[1].add_constr(model, self.input_layer)
+        x_u_layer.add_constr(model, (self.input_layer, self.problems[1]))
+        next_state_layer.add_constr(model, x_u_layer)
+        mpc_cost_next_state_layer.add_constr(model, next_state_layer)
+        model.update()
+
+        if warm_start:
+            self.warm_start(guess)
+
+        x = self.problems[0].vars['x']
+        x_t = mpc_cost_next_state_layer.vars['x']
+
+        obj = 0
+        P_row_idx, P_col_idx, P_col_coef = sp.find(self.problems[0].P)
+        for i, j, Pij in zip(P_row_idx, P_col_idx, P_col_coef):
+            obj += 0.5 * x[i] * Pij * x[j]
+        obj += LinExpr(self.problems[0].q, x)
+        P_t_row_idx, P_t_col_idx, P_t_col_coef = sp.find(mpc_cost_next_state_layer.P)
+        for i, j, Pij in zip(P_t_row_idx, P_t_col_idx, P_t_col_coef):
+            obj -= 0.5 * x_t[i] * Pij * x_t[j]
+        obj -= LinExpr(mpc_cost_next_state_layer.q, x_t)
+
+        # allow non-convex MIQP formulation
+        if len(P_t_col_coef) > 0:
+            model.setParam('NonConvex', 2)
+
+        model.setObjective(obj, GRB.MINIMIZE)
+        model.update()
+        if ideal_cuts:
+            model.optimize(self.ideal_cuts_callback())
+        else:
+            model.optimize()
+
+        return model.objBound, [p.x for p in self.input_layer.vars['out']]
+
+    def stable_region_outer_approx(self, seed_polytope, threads=0, output_flag=0, ideal_cuts=False, warm_start=True, guess=None):
+        if len(self.problems) != 2:
+            raise Exception('Number of problems must be 2.')
+        if not isinstance(self.problems[0].problem, MPCProblem):
+            raise Exception('The first problem must be of type MPCProblem.')
+
+        mpc_problem = self.problems[0].problem
+
+        model = Model()
+        model.setParam('OutputFlag', output_flag)
+        model.setParam('Threads', threads)
+
+        if not self.bounds_calculated:
+            self.compute_bounds()
+
+        x_u_layer = ConcatLayer(self.input_layer.out_size + self.problems[1].out_size, self.problems[1].depth + 1)
+        A, B = self.problems[0].problem.dynamics()
+        weight = np.hstack((A, B))
+        bias = np.zeros(weight.shape[0])
+        next_state_layer = LinearLayer(weight, bias, x_u_layer.depth + 1)
+        mpc_cost_next_state_layer = QPLayer(mpc_problem, next_state_layer.depth + 1)
+
+        x_u_layer.compute_bounds(BoundArithmetic.ZONO_ARITHMETIC, (self.input_layer, self.problems[1]))
+        next_state_layer.compute_bounds(BoundArithmetic.ZONO_ARITHMETIC, x_u_layer)
+        mpc_cost_next_state_layer.compute_bounds(BoundArithmetic.ZONO_ARITHMETIC, next_state_layer)
+
+        self.input_layer.add_vars(model)
+        self.problems[0].add_vars(model, only_primal=True)
+        self.problems[1].add_vars(model)
+        x_u_layer.add_vars(model)
+        next_state_layer.add_vars(model)
+        mpc_cost_next_state_layer.add_vars(model)
+        model.update()
+
+        self.input_layer.add_constr(model)
+        self.problems[0].add_constr(model, self.input_layer, only_primal=True)
+        self.problems[1].add_constr(model, self.input_layer)
+        x_u_layer.add_constr(model, (self.input_layer, self.problems[1]))
+        next_state_layer.add_constr(model, x_u_layer)
+        mpc_cost_next_state_layer.add_constr(model, next_state_layer)
+        model.update()
+
+        if warm_start:
+            self.warm_start(guess)
+
+
+        b = np.zeros(seed_polytope.b.shape)
+
+        for i in trange(seed_polytope.A.shape[0]):
+            model.setObjective(LinExpr(seed_polytope.A[i, :], self.input_layer.vars['out']), GRB.MAXIMIZE)
+            model.update()
+            if ideal_cuts:
+                model.optimize(self.ideal_cuts_callback())
+            else:
+                model.optimize()
+
+            b[i] = model.objVal
+
+        return Polytope(seed_polytope.A, b)
 
     def variables_in_polytope(self, poly, eps=1e-6, threads=0, output_flag=1, warm_start=True, guess=None):
         if len(self.problems) != 1:

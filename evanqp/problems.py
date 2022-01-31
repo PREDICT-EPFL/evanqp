@@ -1,5 +1,6 @@
 from abc import ABC, abstractmethod
-from typing import List, Union
+from typing import List, Union, Tuple
+import numpy as np
 import cvxpy as cp
 
 
@@ -28,8 +29,10 @@ class CvxpyProblem(ABC):
         return sum([v.size for v in self.variables()])
 
 
-class MPCProblem(CvxpyProblem):
+class MPCProblem(CvxpyProblem, ABC):
 
-    @abstractmethod
+    def dynamics(self) -> Tuple[np.ndarray, np.ndarray]:
+        raise NotImplementedError('dynamics() not implemented on MPCProblem, should return (A,B).')
+
     def reduced_objective(self) -> Union[cp.Minimize, cp.Maximize]:
-        pass
+        raise NotImplementedError('reduced_objective() not implemented on MPCProblem, should return objective without first stage cost.')

@@ -2,7 +2,7 @@ import numpy as np
 
 
 class Zonotope:
-
+    # See http://proceedings.mlr.press/v80/mirman18b/mirman18b.pdf
     def __init__(self, head, errors):
         self.head = head
         self.errors = errors
