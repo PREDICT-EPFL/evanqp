@@ -20,6 +20,23 @@ class SeqLayer(BaseLayer):
             layer.add_constr(model, p_layer)
             p_layer = layer
 
+    def add_vars_jacobian(self, model, p_layer):
+        for layer in self.layers:
+            layer.add_vars_jacobian(model, p_layer)
+            p_layer = layer
+        self.vars = self.layers[-1].vars
+
+    def add_constr_jacobian(self, model, p_layer):
+        for layer in self.layers:
+            layer.add_constr_jacobian(model, p_layer)
+            p_layer = layer
+
+    def compute_bounds_jacobian(self, p_layer, **kwargs):
+        for layer in self.layers:
+            layer.compute_bounds_jacobian(p_layer, **kwargs)
+            p_layer = layer
+        self.jacobian_bounds = self.layers[-1].jacobian_bounds
+
     def compute_bounds(self, method, p_layer, **kwargs):
         for layer in self.layers:
             layer.compute_bounds(method, p_layer, **kwargs)

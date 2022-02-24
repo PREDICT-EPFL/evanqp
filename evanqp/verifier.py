@@ -24,7 +24,9 @@ class Verifier:
             else:
                 self.problems.append(SeqLayer.from_pytorch(problem))
 
+        self.model = None
         self.bounds_calculated = False
+        self.bounds_lipschitz_calculated = False
 
     def compute_bounds(self, method=BoundArithmetic.ZONO_ARITHMETIC, **kwargs):
         self.input_layer.compute_bounds(method, **kwargs)
@@ -34,25 +36,50 @@ class Verifier:
 
         return [p.bounds['out'] for p in self.problems]
 
+    def compute_bounds_lipschitz(self, **kwargs):
+        if not self.bounds_calculated:
+            self.compute_bounds(**kwargs)
+
+        self.input_layer.compute_bounds_jacobian(**kwargs)
+        for p in self.problems:
+            p.compute_bounds_jacobian(self.input_layer, **kwargs)
+        self.bounds_lipschitz_calculated = True
+
+        return [p.bounds['out'] for p in self.problems]
+
     def compute_ideal_cuts(self, model):
         ineqs = []
         for p in self.problems:
             ineqs += p.compute_ideal_cuts(model, self.input_layer, None)
         return ineqs
 
-    def setup_milp(self, model):
+    def setup_milp(self):
         if not self.bounds_calculated:
             self.compute_bounds()
 
-        self.input_layer.add_vars(model)
+        self.input_layer.add_vars(self.model)
         for p in self.problems:
-            p.add_vars(model)
-        model.update()
+            p.add_vars(self.model)
+        self.model.update()
 
-        self.input_layer.add_constr(model)
+        self.input_layer.add_constr(self.model)
         for p in self.problems:
-            p.add_constr(model, self.input_layer)
-        model.update()
+            p.add_constr(self.model, self.input_layer)
+        self.model.update()
+
+    def setup_milp_lipschitz(self):
+        if not self.bounds_lipschitz_calculated:
+            self.compute_bounds_lipschitz()
+
+        self.input_layer.add_vars_jacobian(self.model, None)
+        for p in self.problems:
+            p.add_vars_jacobian(self.model, self.input_layer)
+        self.model.update()
+
+        self.input_layer.add_constr_jacobian(self.model, None)
+        for p in self.problems:
+            p.add_constr_jacobian(self.model, self.input_layer)
+        self.model.update()
 
     def ideal_cuts_callback(self):
         def _callback(model, where):
@@ -73,38 +100,50 @@ class Verifier:
         for problem in self.problems:
             problem.forward(guess, warm_start=True)
 
-    def find_max_abs_diff(self, threads=0, output_flag=1, ideal_cuts=False, warm_start=True, guess=None):
-        model = Model()
-        model.setParam('OutputFlag', output_flag)
-        model.setParam('Threads', threads)
-
+    def approximation_error(self, norm=np.inf, threads=0, output_flag=1, feasibility_tol=None, int_feas_tol=None, optimality_tol=None, ideal_cuts=False, warm_start=True, guess=None):
         if len(self.problems) != 2:
             raise Exception('Number of problems must be 2.')
         if self.problems[0].out_size != self.problems[0].out_size:
             raise Exception('Problems do not have the same output size')
 
-        self.setup_milp(model)
+        self.model = Model()
+        self.model.setParam('OutputFlag', output_flag)
+        self.model.setParam('Threads', threads)
+        if feasibility_tol is not None:
+            self.model.setParam('FeasibilityTol', feasibility_tol)
+        if int_feas_tol is not None:
+            self.model.setParam('IntFeasTol', int_feas_tol)
+        if optimality_tol is not None:
+            self.model.setParam('OptimalityTol', optimality_tol)
+
+        self.setup_milp()
         if warm_start:
             self.warm_start(guess)
 
-        diff = [model.addVar(vtype=GRB.CONTINUOUS, lb=-GRB.INFINITY, ub=GRB.INFINITY) for _ in range(self.problems[0].out_size)]
-        abs_diff = [model.addVar(vtype=GRB.CONTINUOUS, lb=0, ub=GRB.INFINITY) for _ in range(self.problems[0].out_size)]
+        diff = [self.model.addVar(vtype=GRB.CONTINUOUS, lb=-GRB.INFINITY, ub=GRB.INFINITY) for _ in range(self.problems[0].out_size)]
+        abs_diff = [self.model.addVar(vtype=GRB.CONTINUOUS, lb=0, ub=GRB.INFINITY) for _ in range(self.problems[0].out_size)]
         for i in range(self.problems[0].out_size):
-            model.addConstr(diff[i] == self.problems[0].vars['out'][i] - self.problems[1].vars['out'][i])
-            model.addConstr(abs_diff[i] == abs_(diff[i]))
-        max_abs_diff = model.addVar(vtype=GRB.CONTINUOUS)
-        model.addConstr(max_abs_diff == max_(abs_diff))
+            self.model.addConstr(diff[i] == self.problems[0].vars['out'][i] - self.problems[1].vars['out'][i])
+            self.model.addConstr(abs_diff[i] == abs_(diff[i]))
 
-        model.setObjective(max_abs_diff, GRB.MAXIMIZE)
-        model.update()
-        if ideal_cuts:
-            model.optimize(self.ideal_cuts_callback())
+        error_norm = self.model.addVar(vtype=GRB.CONTINUOUS)
+        if norm == np.inf:
+            self.model.addConstr(error_norm == max_(abs_diff))
+        elif norm == 1:
+            self.model.addConstr(error_norm == sum(abs_diff))
         else:
-            model.optimize()
+            raise Exception('Norm can only be inf(np.inf) or 1')
 
-        return model.objBound, [p.x for p in self.input_layer.vars['out']]
+        self.model.setObjective(error_norm, GRB.MAXIMIZE)
+        self.model.update()
+        if ideal_cuts:
+            self.model.optimize(self.ideal_cuts_callback())
+        else:
+            self.model.optimize()
 
-    def verify_stability_sufficient(self, threads=0, output_flag=1, ideal_cuts=False, warm_start=True, guess=None):
+        return self.model.objBound, np.array([p.x for p in self.input_layer.vars['out']])
+
+    def verify_stability_sufficient(self, threads=0, output_flag=1, feasibility_tol=None, int_feas_tol=None, optimality_tol=None, ideal_cuts=False, warm_start=True, guess=None):
         if len(self.problems) != 2:
             raise Exception('Number of problems must be 2.')
         if not isinstance(self.problems[0].problem, MPCProblem):
@@ -112,9 +151,15 @@ class Verifier:
 
         mpc_problem = self.problems[0].problem
 
-        model = Model()
-        model.setParam('OutputFlag', output_flag)
-        model.setParam('Threads', threads)
+        self.model = Model()
+        self.model.setParam('OutputFlag', output_flag)
+        self.model.setParam('Threads', threads)
+        if feasibility_tol is not None:
+            self.model.setParam('FeasibilityTol', feasibility_tol)
+        if int_feas_tol is not None:
+            self.model.setParam('IntFeasTol', int_feas_tol)
+        if optimality_tol is not None:
+            self.model.setParam('OptimalityTol', optimality_tol)
 
         if not self.bounds_calculated:
             self.compute_bounds()
@@ -130,21 +175,21 @@ class Verifier:
         reduced_objective_mpc_layer = QPLayer(reduced_objective_problem, 1)
         reduced_objective_mpc_layer.compute_bounds(BoundArithmetic.INT_ARITHMETIC, self.input_layer)
 
-        self.input_layer.add_vars(model)
-        self.problems[0].add_vars(model, only_primal=True)
-        reduced_objective_mpc_layer.add_vars(model)
-        self.problems[1].add_vars(model)
-        model.update()
+        self.input_layer.add_vars(self.model)
+        self.problems[0].add_vars(self.model, only_primal=True)
+        reduced_objective_mpc_layer.add_vars(self.model)
+        self.problems[1].add_vars(self.model)
+        self.model.update()
 
-        self.input_layer.add_constr(model)
-        self.problems[0].add_constr(model, self.input_layer, only_primal=True)
-        reduced_objective_mpc_layer.add_constr(model, self.input_layer)
-        self.problems[1].add_constr(model, self.input_layer)
-        model.update()
+        self.input_layer.add_constr(self.model)
+        self.problems[0].add_constr(self.model, self.input_layer, only_primal=True)
+        reduced_objective_mpc_layer.add_constr(self.model, self.input_layer)
+        self.problems[1].add_constr(self.model, self.input_layer)
+        self.model.update()
 
         for i in range(reduced_objective_mpc_layer.out_size):
-            model.addConstr(reduced_objective_mpc_layer.vars['out'][i] == self.problems[1].vars['out'][i])
-        model.update()
+            self.model.addConstr(reduced_objective_mpc_layer.vars['out'][i] == self.problems[1].vars['out'][i])
+        self.model.update()
 
         if warm_start:
             self.warm_start(guess)
@@ -164,18 +209,18 @@ class Verifier:
 
         # allow non-convex MIQP formulation
         if len(P_t_col_coef) > 0:
-            model.setParam('NonConvex', 2)
+            self.model.setParam('NonConvex', 2)
 
-        model.setObjective(obj, GRB.MINIMIZE)
-        model.update()
+        self.model.setObjective(obj, GRB.MINIMIZE)
+        self.model.update()
         if ideal_cuts:
-            model.optimize(self.ideal_cuts_callback())
+            self.model.optimize(self.ideal_cuts_callback())
         else:
-            model.optimize()
+            self.model.optimize()
 
-        return model.objBound, [p.x for p in self.input_layer.vars['out']]
+        return self.model.objBound, np.array([p.x for p in self.input_layer.vars['out']])
 
-    def verify_stability_direct(self, threads=0, output_flag=1, ideal_cuts=False, warm_start=True, guess=None):
+    def verify_stability_direct(self, threads=0, output_flag=1, feasibility_tol=None, int_feas_tol=None, optimality_tol=None, ideal_cuts=False, warm_start=True, guess=None):
         if len(self.problems) != 2:
             raise Exception('Number of problems must be 2.')
         if not isinstance(self.problems[0].problem, MPCProblem):
@@ -183,9 +228,15 @@ class Verifier:
 
         mpc_problem = self.problems[0].problem
 
-        model = Model()
-        model.setParam('OutputFlag', output_flag)
-        model.setParam('Threads', threads)
+        self.model = Model()
+        self.model.setParam('OutputFlag', output_flag)
+        self.model.setParam('Threads', threads)
+        if feasibility_tol is not None:
+            self.model.setParam('FeasibilityTol', feasibility_tol)
+        if int_feas_tol is not None:
+            self.model.setParam('IntFeasTol', int_feas_tol)
+        if optimality_tol is not None:
+            self.model.setParam('OptimalityTol', optimality_tol)
 
         if not self.bounds_calculated:
             self.compute_bounds()
@@ -201,21 +252,21 @@ class Verifier:
         next_state_layer.compute_bounds(BoundArithmetic.ZONO_ARITHMETIC, x_u_layer)
         mpc_cost_next_state_layer.compute_bounds(BoundArithmetic.ZONO_ARITHMETIC, next_state_layer)
 
-        self.input_layer.add_vars(model)
-        self.problems[0].add_vars(model, only_primal=True)
-        self.problems[1].add_vars(model)
-        x_u_layer.add_vars(model)
-        next_state_layer.add_vars(model)
-        mpc_cost_next_state_layer.add_vars(model)
-        model.update()
+        self.input_layer.add_vars(self.model)
+        self.problems[0].add_vars(self.model, only_primal=True)
+        self.problems[1].add_vars(self.model)
+        x_u_layer.add_vars(self.model)
+        next_state_layer.add_vars(self.model)
+        mpc_cost_next_state_layer.add_vars(self.model)
+        self.model.update()
 
-        self.input_layer.add_constr(model)
-        self.problems[0].add_constr(model, self.input_layer, only_primal=True)
-        self.problems[1].add_constr(model, self.input_layer)
-        x_u_layer.add_constr(model, (self.input_layer, self.problems[1]))
-        next_state_layer.add_constr(model, x_u_layer)
-        mpc_cost_next_state_layer.add_constr(model, next_state_layer)
-        model.update()
+        self.input_layer.add_constr(self.model)
+        self.problems[0].add_constr(self.model, self.input_layer, only_primal=True)
+        self.problems[1].add_constr(self.model, self.input_layer)
+        x_u_layer.add_constr(self.model, (self.input_layer, self.problems[1]))
+        next_state_layer.add_constr(self.model, x_u_layer)
+        mpc_cost_next_state_layer.add_constr(self.model, next_state_layer)
+        self.model.update()
 
         if warm_start:
             self.warm_start(guess)
@@ -235,18 +286,18 @@ class Verifier:
 
         # allow non-convex MIQP formulation
         if len(P_t_col_coef) > 0:
-            model.setParam('NonConvex', 2)
+            self.model.setParam('NonConvex', 2)
 
-        model.setObjective(obj, GRB.MINIMIZE)
-        model.update()
+        self.model.setObjective(obj, GRB.MINIMIZE)
+        self.model.update()
         if ideal_cuts:
-            model.optimize(self.ideal_cuts_callback())
+            self.model.optimize(self.ideal_cuts_callback())
         else:
-            model.optimize()
+            self.model.optimize()
 
-        return model.objBound, [p.x for p in self.input_layer.vars['out']]
+        return self.model.objBound, np.array([p.x for p in self.input_layer.vars['out']])
 
-    def stable_region_outer_approx(self, seed_polytope, threads=0, output_flag=0, ideal_cuts=False, warm_start=True, guess=None):
+    def stable_region_outer_approx(self, seed_polytope, threads=0, output_flag=0, feasibility_tol=None, int_feas_tol=None, optimality_tol=None, ideal_cuts=False, warm_start=True, guess=None):
         if len(self.problems) != 2:
             raise Exception('Number of problems must be 2.')
         if not isinstance(self.problems[0].problem, MPCProblem):
@@ -254,9 +305,15 @@ class Verifier:
 
         mpc_problem = self.problems[0].problem
 
-        model = Model()
-        model.setParam('OutputFlag', output_flag)
-        model.setParam('Threads', threads)
+        self.model = Model()
+        self.model.setParam('OutputFlag', output_flag)
+        self.model.setParam('Threads', threads)
+        if feasibility_tol is not None:
+            self.model.setParam('FeasibilityTol', feasibility_tol)
+        if int_feas_tol is not None:
+            self.model.setParam('IntFeasTol', int_feas_tol)
+        if optimality_tol is not None:
+            self.model.setParam('OptimalityTol', optimality_tol)
 
         if not self.bounds_calculated:
             self.compute_bounds()
@@ -272,21 +329,21 @@ class Verifier:
         next_state_layer.compute_bounds(BoundArithmetic.ZONO_ARITHMETIC, x_u_layer)
         mpc_cost_next_state_layer.compute_bounds(BoundArithmetic.ZONO_ARITHMETIC, next_state_layer)
 
-        self.input_layer.add_vars(model)
-        self.problems[0].add_vars(model, only_primal=True)
-        self.problems[1].add_vars(model)
-        x_u_layer.add_vars(model)
-        next_state_layer.add_vars(model)
-        mpc_cost_next_state_layer.add_vars(model)
-        model.update()
+        self.input_layer.add_vars(self.model)
+        self.problems[0].add_vars(self.model, only_primal=True)
+        self.problems[1].add_vars(self.model)
+        x_u_layer.add_vars(self.model)
+        next_state_layer.add_vars(self.model)
+        mpc_cost_next_state_layer.add_vars(self.model)
+        self.model.update()
 
-        self.input_layer.add_constr(model)
-        self.problems[0].add_constr(model, self.input_layer, only_primal=True)
-        self.problems[1].add_constr(model, self.input_layer)
-        x_u_layer.add_constr(model, (self.input_layer, self.problems[1]))
-        next_state_layer.add_constr(model, x_u_layer)
-        mpc_cost_next_state_layer.add_constr(model, next_state_layer)
-        model.update()
+        self.input_layer.add_constr(self.model)
+        self.problems[0].add_constr(self.model, self.input_layer, only_primal=True)
+        self.problems[1].add_constr(self.model, self.input_layer)
+        x_u_layer.add_constr(self.model, (self.input_layer, self.problems[1]))
+        next_state_layer.add_constr(self.model, x_u_layer)
+        mpc_cost_next_state_layer.add_constr(self.model, next_state_layer)
+        self.model.update()
 
         if warm_start:
             self.warm_start(guess)
@@ -295,16 +352,135 @@ class Verifier:
         b = np.zeros(seed_polytope.b.shape)
 
         for i in trange(seed_polytope.A.shape[0]):
-            model.setObjective(LinExpr(seed_polytope.A[i, :], self.input_layer.vars['out']), GRB.MAXIMIZE)
-            model.update()
+            self.model.setObjective(LinExpr(seed_polytope.A[i, :], self.input_layer.vars['out']), GRB.MAXIMIZE)
+            self.model.update()
             if ideal_cuts:
-                model.optimize(self.ideal_cuts_callback())
+                self.model.optimize(self.ideal_cuts_callback())
             else:
-                model.optimize()
+                self.model.optimize()
 
-            b[i] = model.objVal
+            b[i] = self.model.objVal
 
         return Polytope(seed_polytope.A, b)
+
+    def lipschitz_constant(self, norm=np.inf, threads=0, output_flag=1, feasibility_tol=None, int_feas_tol=None, optimality_tol=None, ideal_cuts=False, warm_start=False, guess=None):
+        if len(self.problems) != 1:
+            raise Exception('Number of problems must be 1.')
+
+        self.model = Model()
+        self.model.setParam('OutputFlag', output_flag)
+        self.model.setParam('Threads', threads)
+        if feasibility_tol is not None:
+            self.model.setParam('FeasibilityTol', feasibility_tol)
+        if int_feas_tol is not None:
+            self.model.setParam('IntFeasTol', int_feas_tol)
+        if optimality_tol is not None:
+            self.model.setParam('OptimalityTol', optimality_tol)
+
+        self.setup_milp()
+        self.setup_milp_lipschitz()
+
+        if warm_start:
+            self.warm_start(guess)
+
+        abs_jac_T = np.empty((self.problems[0].vars['out_jac'].shape[1], self.problems[0].vars['out_jac'].shape[0]), dtype=object)
+        for i in range(self.problems[0].vars['out_jac'].shape[0]):
+            for j in range(self.problems[0].vars['out_jac'].shape[1]):
+                abs_jac_T[j, i] = self.model.addVar(vtype=GRB.CONTINUOUS, lb=0, ub=GRB.INFINITY)
+                self.model.addConstr(abs_jac_T[j, i] == abs_(self.problems[0].vars['out_jac'][i, j]))
+
+        lipschitz_norm = self.model.addVar(vtype=GRB.CONTINUOUS)
+        if norm == np.inf:
+            lipschitz_norm_sum = [self.model.addVar(vtype=GRB.CONTINUOUS, lb=0, ub=GRB.INFINITY) for _ in range(self.problems[0].vars['out_jac'].shape[1])]
+            for i in range(self.problems[0].vars['out_jac'].shape[1]):
+                self.model.addConstr(lipschitz_norm_sum[i] == sum(abs_jac_T[i, :]))
+            self.model.addConstr(lipschitz_norm == max_(lipschitz_norm_sum))
+        elif norm == 1:
+            lipschitz_norm_sum = [self.model.addVar(vtype=GRB.CONTINUOUS, lb=0, ub=GRB.INFINITY) for _ in range(self.problems[0].vars['out_jac'].shape[0])]
+            for j in range(self.problems[0].vars['out_jac'].shape[0]):
+                self.model.addConstr(lipschitz_norm_sum[j] == sum(abs_jac_T[:, j]))
+            self.model.addConstr(lipschitz_norm == max_(lipschitz_norm_sum))
+        else:
+            raise Exception('Norm can only be inf(np.inf) or 1')
+
+        self.model.setObjective(lipschitz_norm, GRB.MAXIMIZE)
+        self.model.update()
+        if ideal_cuts:
+            self.model.optimize(self.ideal_cuts_callback())
+        else:
+            self.model.optimize()
+
+        jacobian = np.zeros(self.problems[0].vars['out_jac'].shape)
+        for i in range(self.problems[0].vars['out_jac'].shape[0]):
+            for j in range(self.problems[0].vars['out_jac'].shape[1]):
+                jacobian[i, j] = self.problems[0].vars['out_jac'][i, j].x
+
+        return self.model.objBound, jacobian, np.array([p.x for p in self.input_layer.vars['out']])
+
+    def approximation_error_lipschitz_constant(self, norm=np.inf, threads=0, output_flag=1, feasibility_tol=None, int_feas_tol=None, optimality_tol=None, ideal_cuts=False, warm_start=False, guess=None):
+        if len(self.problems) != 2:
+            raise Exception('Number of problems must be 2.')
+        if self.problems[0].out_size != self.problems[0].out_size:
+            raise Exception('Problems do not have the same output size')
+
+        self.model = Model()
+        self.model.setParam('OutputFlag', output_flag)
+        self.model.setParam('Threads', threads)
+        if feasibility_tol is not None:
+            self.model.setParam('FeasibilityTol', feasibility_tol)
+        if int_feas_tol is not None:
+            self.model.setParam('IntFeasTol', int_feas_tol)
+        if optimality_tol is not None:
+            self.model.setParam('OptimalityTol', optimality_tol)
+
+        self.setup_milp()
+        self.setup_milp_lipschitz()
+
+        if warm_start:
+            self.warm_start(guess)
+
+        diff_jac_T = np.empty((self.problems[0].vars['out_jac'].shape[1], self.problems[0].vars['out_jac'].shape[0]), dtype=object)
+        abs_diff_jac_T = np.empty((self.problems[0].vars['out_jac'].shape[1], self.problems[0].vars['out_jac'].shape[0]), dtype=object)
+        for i in range(self.problems[0].vars['out_jac'].shape[0]):
+            for j in range(self.problems[0].vars['out_jac'].shape[1]):
+                diff_jac_T[j, i] = self.model.addVar(vtype=GRB.CONTINUOUS, lb=0, ub=GRB.INFINITY)
+                abs_diff_jac_T[j, i] = self.model.addVar(vtype=GRB.CONTINUOUS, lb=0, ub=GRB.INFINITY)
+                self.model.addConstr(diff_jac_T[j, i] == self.problems[0].vars['out_jac'][i, j] - self.problems[1].vars['out_jac'][i, j])
+                self.model.addConstr(abs_diff_jac_T[j, i] == abs_(diff_jac_T[j, i]))
+
+        lipschitz_norm = self.model.addVar(vtype=GRB.CONTINUOUS)
+        if norm == np.inf:
+            lipschitz_norm_sum = [self.model.addVar(vtype=GRB.CONTINUOUS, lb=0, ub=GRB.INFINITY) for _ in range(self.problems[0].vars['out_jac'].shape[1])]
+            for i in range(self.problems[0].vars['out_jac'].shape[1]):
+                self.model.addConstr(lipschitz_norm_sum[i] == sum(abs_diff_jac_T[i, :]))
+            self.model.addConstr(lipschitz_norm == max_(lipschitz_norm_sum))
+        elif norm == 1:
+            lipschitz_norm_sum = [self.model.addVar(vtype=GRB.CONTINUOUS, lb=0, ub=GRB.INFINITY) for _ in
+                                  range(self.problems[0].vars['out_jac'].shape[0])]
+            for j in range(self.problems[0].vars['out_jac'].shape[0]):
+                self.model.addConstr(lipschitz_norm_sum[j] == sum(abs_diff_jac_T[:, j]))
+            self.model.addConstr(lipschitz_norm == max_(lipschitz_norm_sum))
+        else:
+            raise Exception('Norm can only be inf(np.inf) or 1')
+
+        self.model.setObjective(lipschitz_norm, GRB.MAXIMIZE)
+        self.model.update()
+        if ideal_cuts:
+            self.model.optimize(self.ideal_cuts_callback())
+        else:
+            self.model.optimize()
+
+        jacobian0 = np.zeros(self.problems[0].vars['out_jac'].shape)
+        for i in range(self.problems[0].vars['out_jac'].shape[0]):
+            for j in range(self.problems[0].vars['out_jac'].shape[1]):
+                jacobian0[i, j] = self.problems[0].vars['out_jac'][i, j].x
+
+        jacobian1 = np.zeros(self.problems[1].vars['out_jac'].shape)
+        for i in range(self.problems[1].vars['out_jac'].shape[0]):
+            for j in range(self.problems[1].vars['out_jac'].shape[1]):
+                jacobian1[i, j] = self.problems[1].vars['out_jac'][i, j].x
+
+        return self.model.objBound, jacobian0, jacobian1, np.array([p.x for p in self.input_layer.vars['out']])
 
     def variables_in_polytope(self, poly, eps=1e-6, threads=0, output_flag=1, warm_start=True, guess=None):
         if len(self.problems) != 1:
@@ -314,20 +490,20 @@ class Verifier:
         if self.problems[0].out_size != poly.A.shape[1]:
             raise Exception('poly shape does not match problem output size.')
 
-        model = Model()
-        model.setParam('OutputFlag', output_flag)
-        model.setParam('Threads', threads)
+        self.model = Model()
+        self.model.setParam('OutputFlag', output_flag)
+        self.model.setParam('Threads', threads)
 
-        self.setup_milp(model)
+        self.setup_milp()
         if warm_start:
             self.warm_start(guess)
 
         for i in range(self.problems[0].out_size):
-            model.setObjective(LinExpr(poly.A[i, :], self.problems[0].vars['out']) - poly.b[i], GRB.MAXIMIZE)
-            model.update()
-            model.optimize()
+            self.model.setObjective(LinExpr(poly.A[i, :], self.problems[0].vars['out']) - poly.b[i], GRB.MAXIMIZE)
+            self.model.update()
+            self.model.optimize()
 
-            if model.objBound > eps:
+            if self.model.objBound > eps:
                 return False
 
         return True

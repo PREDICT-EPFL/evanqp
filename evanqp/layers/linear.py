@@ -1,5 +1,5 @@
 import numpy as np
-from gurobipy import LinExpr
+from gurobipy import GRB, LinExpr
 
 from evanqp.layers import BaseLayer, BoundArithmetic
 
@@ -15,6 +15,25 @@ class LinearLayer(BaseLayer):
     def add_constr(self, model, p_layer):
         for i in range(self.out_size):
             model.addConstr(self.vars['out'][i] == LinExpr(self.weight[i, :], p_layer.vars['out']) + self.bias[i])
+
+    def add_vars_jacobian(self, model, p_layer):
+        self.vars['out_jac'] = np.empty((self.weight.shape[0], p_layer.vars['out_jac'].shape[1]), dtype=object)
+        for i in range(self.weight.shape[0]):
+            for j in range(p_layer.vars['out_jac'].shape[1]):
+                self.vars['out_jac'][i, j] = model.addVar(vtype=GRB.CONTINUOUS, lb=-GRB.INFINITY, ub=GRB.INFINITY)
+
+    def add_constr_jacobian(self, model, p_layer):
+        for i in range(self.weight.shape[0]):
+            for j in range(p_layer.vars['out_jac'].shape[1]):
+                model.addConstr(self.vars['out_jac'][i, j] == LinExpr(self.weight[i, :], p_layer.vars['out_jac'][:, j]))
+
+    def compute_bounds_jacobian(self, p_layer, **kwargs):
+        W_p = np.clip(self.weight, 0, None)
+        W_m = np.clip(self.weight, None, 0)
+
+        self.jacobian_bounds['out'] = {}
+        self.jacobian_bounds['out']['lb'] = W_m @ p_layer.jacobian_bounds['out']['ub'] + W_p @ p_layer.jacobian_bounds['out']['lb']
+        self.jacobian_bounds['out']['ub'] = W_p @ p_layer.jacobian_bounds['out']['ub'] + W_m @ p_layer.jacobian_bounds['out']['lb']
 
     def compute_bounds(self, method, p_layer, **kwargs):
         if method == BoundArithmetic.INT_ARITHMETIC:

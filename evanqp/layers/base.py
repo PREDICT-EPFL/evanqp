@@ -15,6 +15,7 @@ class BaseLayer(ABC):
         self.vars = {'out': []}
         self.bounds = {'out': {'lb': np.array([]), 'ub': np.array([])}}
         self.zono_bounds = {}
+        self.jacobian_bounds = {}
         self.out_size = out_size
         self.depth = depth
 
@@ -27,6 +28,15 @@ class BaseLayer(ABC):
     @abstractmethod
     def add_constr(self, model, p_layer):
         pass
+
+    def add_vars_jacobian(self, model, p_layer):
+        raise NotImplementedError('add_vars_jacobian not implemented')
+
+    def add_constr_jacobian(self, model, p_layer):
+        raise NotImplementedError('add_constr_jacobian not implemented')
+
+    def compute_bounds_jacobian(self, p_layer, **kwargs):
+        raise NotImplementedError('compute_bounds_jacobian not implemented')
 
     @abstractmethod
     def compute_bounds(self, method, p_layer, **kwargs):

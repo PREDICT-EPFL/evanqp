@@ -105,12 +105,180 @@ class QPLayer(BaseLayer):
                 model.addConstr(self.vars['out'][i] == self.vars['x'][idx + k])
                 i += 1
 
-    def compute_bounds(self, method, p_layer, mip=False, time_limit=1, with_output=True,  **kwargs):
-        # add bounds from previous layer as constraints
+    def add_vars_jacobian(self, model, p_layer):
+        self.vars['out_jac'] = np.empty((self.problem.variable_size(), self.problem.parameter_size()), dtype=object)
+        for i in range(self.problem.variable_size()):
+            for j in range(self.problem.parameter_size()):
+                self.vars['out_jac'][i, j] = model.addVar(vtype=GRB.CONTINUOUS, lb=self.jacobian_bounds['out']['lb'][i, j], ub=self.jacobian_bounds['out']['ub'][i, j])
+
+        self.vars['aux'] = []
+        for i_aux in range(self.problem.parameter_size()):
+            aux_vars = {}
+            aux_vars['x'] = [model.addVar(vtype=GRB.CONTINUOUS, lb=self.aux_lb[i_aux][i], ub=self.aux_ub[i_aux][i]) for i in range(self.P.shape[1])]
+            aux_vars['mu'] = [model.addVar(vtype=GRB.CONTINUOUS, lb=-GRB.INFINITY, ub=GRB.INFINITY) for _ in range(self.A.shape[0] + self.problem.parameter_size())]
+            aux_vars['lam'] = [model.addVar(vtype=GRB.CONTINUOUS, lb=self.aux_big_m_lam_lb[i_aux][i], ub=self.aux_big_m_lam_ub[i_aux][i]) for i in range(self.F.shape[0])]
+            aux_vars['out'] = [model.addVar(vtype=GRB.CONTINUOUS, lb=-GRB.INFINITY, ub=GRB.INFINITY) for _ in range(self.out_size)]
+            self.vars['aux'].append(aux_vars)
+
+    def add_constr_jacobian(self, model, p_layer, without_compl=False):
+        if not isinstance(p_layer, InputLayer):
+            raise Exception('Jacobains of QP layers have to first.')
+
+        pertubation = 1.0
+
+        for i_aux in range(self.problem.parameter_size()):
+            # add previous layer as equality constraint
+            A_par = np.zeros((self.problem.parameter_size(), self.A.shape[1]))
+            b_par = np.zeros(self.problem.parameter_size(), dtype=object)
+            i = 0
+            for j in range(len(self.problem.parameters())):
+                idx = self.var_id_to_col[self.problem.parameters()[j].id]
+                size = self.problem.parameters()[j].size
+                for k in range(size):
+                    A_par[i, idx + k] = 1
+                    b_par[i] = p_layer.vars['out'][i]
+                    if i_aux == i:
+                        b_par[i] += pertubation
+                    i += 1
+
+            A_full = sp.vstack((self.A, A_par), format='csc')
+            b_full = np.concatenate((self.b, b_par))
+
+            # P @ x + q + A.T @ mu + F.T @ lam = 0
+            for i in range(self.P.shape[1]):
+                _, P_col_idx, P_col_coef = sp.find(self.P[i, :])
+                _, A_col_idx, A_col_coef = sp.find(A_full.T[i, :])
+                _, F_col_idx, F_col_coef = sp.find(self.F.T[i, :])
+                model.addConstr(LinExpr(P_col_coef, [self.vars['aux'][i_aux]['x'][j] for j in P_col_idx])
+                                + self.q[i]
+                                + LinExpr(A_col_coef, [self.vars['aux'][i_aux]['mu'][j] for j in A_col_idx])
+                                + LinExpr(F_col_coef, [self.vars['aux'][i_aux]['lam'][j] for j in F_col_idx])
+                                == 0)
+
+            # A @ x = b
+            for i in range(A_full.shape[0]):
+                _, A_col_idx, A_col_coef = sp.find(A_full[i, :])
+                model.addConstr(LinExpr(A_col_coef, [self.vars['aux'][i_aux]['x'][j] for j in A_col_idx]) == b_full[i])
+
+            # (F_i @ x - g_i) * lam_i = 0
+            if not without_compl:
+                for i in range(self.F.shape[0]):
+                    _, F_col_idx, F_col_coef = sp.find(self.F[i, :])
+                    model.addConstr((self.vars['r'][i] == 0) >> (LinExpr(F_col_coef, [self.vars['aux'][i_aux]['x'][j] for j in F_col_idx]) - self.g[i] == 0))
+                    if self.aux_big_m_ineq_lb[i_aux][i] > -GRB.INFINITY:
+                        model.addConstr(self.g[i] - LinExpr(F_col_coef, [self.vars['aux'][i_aux]['x'][j] for j in F_col_idx]) >= self.vars['r'][i] * self.aux_big_m_ineq_lb[i_aux][i])
+                    if self.aux_big_m_ineq_ub[i_aux][i] < GRB.INFINITY:
+                        model.addConstr(self.g[i] - LinExpr(F_col_coef, [self.vars['aux'][i_aux]['x'][j] for j in F_col_idx]) <= self.vars['r'][i] * self.aux_big_m_ineq_ub[i_aux][i])
+
+                    model.addConstr((self.vars['r'][i] == 1) >> (self.vars['aux'][i_aux]['lam'][i] == 0))
+                    if self.aux_big_m_lam_lb[i_aux][i] > -GRB.INFINITY:
+                        model.addConstr(self.vars['aux'][i_aux]['lam'][i] >= (1 - self.vars['r'][i]) * self.aux_big_m_lam_lb[i_aux][i])
+                    if self.aux_big_m_lam_ub[i_aux][i] < GRB.INFINITY:
+                        model.addConstr(self.vars['aux'][i_aux]['lam'][i] <= (1 - self.vars['r'][i]) * self.aux_big_m_lam_ub[i_aux][i])
+
+            i = 0
+            for j in range(len(self.problem.variables())):
+                idx = self.var_id_to_col[self.problem.variables()[j].id]
+                size = self.problem.variables()[j].size
+                for k in range(size):
+                    model.addConstr(self.vars['aux'][i_aux]['out'][i] == self.vars['aux'][i_aux]['x'][idx + k])
+                    i += 1
+
+        for i in range(self.problem.variable_size()):
+            for j in range(self.problem.parameter_size()):
+                model.addConstr(self.vars['out_jac'][i, j] == 1.0 / pertubation * (self.vars['aux'][j]['out'][i] - self.vars['out'][i]))
+
+    def compute_bounds_jacobian(self, p_layer, dual_bound=1e6, mip=False, time_limit=1, with_output=True, **kwargs):
         model = Model()
         model.setParam('OutputFlag', 0)
         model.setParam('TimeLimit', time_limit)
 
+        # add bounds from previous layer as constraints
+        input_set = Box(p_layer.bounds['out']['lb'], p_layer.bounds['out']['ub'])
+        input_layer = InputLayer(input_set)
+        input_layer.compute_bounds(BoundArithmetic.INT_ARITHMETIC, **kwargs)
+        input_layer.add_vars(model)
+        model.update()
+        input_layer.add_constr(model)
+        model.update()
+
+        old_vars = self.vars
+        self.vars = {'out': []}
+
+        self.jacobian_bounds['out'] = {}
+        self.jacobian_bounds['out']['lb'] = -GRB.INFINITY * np.ones((self.problem.variable_size(), self.problem.parameter_size()))
+        self.jacobian_bounds['out']['ub'] = GRB.INFINITY * np.ones((self.problem.variable_size(), self.problem.parameter_size()))
+
+        self.aux_lb = [-GRB.INFINITY * np.ones(self.A.shape[1]) for _ in range(self.problem.parameter_size())]
+        self.aux_ub = [GRB.INFINITY * np.ones(self.A.shape[1]) for _ in range(self.problem.parameter_size())]
+
+        self.aux_big_m_ineq_lb = [-dual_bound * np.ones(self.F.shape[0]) for _ in range(self.problem.parameter_size())]
+        self.aux_big_m_ineq_ub = [dual_bound * np.ones(self.F.shape[0]) for _ in range(self.problem.parameter_size())]
+        self.aux_big_m_lam_lb = [-dual_bound * np.ones(self.F.shape[0]) for _ in range(self.problem.parameter_size())]
+        self.aux_big_m_lam_ub = [dual_bound * np.ones(self.F.shape[0]) for _ in range(self.problem.parameter_size())]
+
+        self.add_vars(model)
+        model.update()
+        self.add_constr(model, input_layer, without_compl=(not mip))
+        model.update()
+
+        self.add_vars_jacobian(model, input_layer)
+        model.update()
+        self.add_constr_jacobian(model, input_layer, without_compl=(not mip))
+        model.update()
+
+        for i in trange(self.F.shape[0], desc='Aux QP Ineq Bound'):
+            for i_aux in range(self.problem.parameter_size()):
+                _, F_col_idx, F_col_coef = sp.find(self.F[i, :])
+                model.setObjective(self.g[i] - LinExpr(F_col_coef, [self.vars['aux'][i_aux]['x'][j] for j in F_col_idx]), GRB.MINIMIZE)
+                model.update()
+                model.optimize()
+                if model.Status == GRB.OPTIMAL:
+                    self.aux_big_m_ineq_lb[i_aux][i] = model.objBound
+
+                model.setObjective(self.g[i] - LinExpr(F_col_coef, [self.vars['aux'][i_aux]['x'][j] for j in F_col_idx]), GRB.MAXIMIZE)
+                model.update()
+                model.optimize()
+                if model.Status == GRB.OPTIMAL:
+                    self.aux_big_m_ineq_ub[i_aux][i] = model.objBound
+
+        for i in trange(self.F.shape[0], desc='Aux QP Dual Bound'):
+            for i_aux in range(self.problem.parameter_size()):
+                model.setObjective(self.vars['aux'][i_aux]['lam'][i], GRB.MINIMIZE)
+                model.update()
+                model.optimize()
+                if model.Status == GRB.OPTIMAL:
+                    self.aux_big_m_lam_lb[i_aux][i] = model.objBound
+
+                model.setObjective(self.vars['aux'][i_aux]['lam'][i], GRB.MAXIMIZE)
+                model.update()
+                model.optimize()
+                if model.Status == GRB.OPTIMAL:
+                    self.aux_big_m_lam_ub[i_aux][i] = model.objBound
+
+        if with_output:
+            for i in trange(self.problem.variable_size(), desc='QP Gain Bound'):
+                for j in range(self.problem.parameter_size()):
+                    model.setObjective(self.vars['out_jac'][i, j], GRB.MINIMIZE)
+                    model.update()
+                    model.optimize()
+                    if model.Status == GRB.OPTIMAL:
+                        self.jacobian_bounds['out']['lb'][i, j] = model.objBound
+
+                    model.setObjective(self.vars['out_jac'][i, j], GRB.MAXIMIZE)
+                    model.update()
+                    model.optimize()
+                    if model.Status == GRB.OPTIMAL:
+                        self.jacobian_bounds['out']['ub'][i, j] = model.objBound
+
+        self.vars = old_vars
+
+    def compute_bounds(self, method, p_layer, dual_bound=1e6, mip=False, time_limit=1, with_output=True,  **kwargs):
+        model = Model()
+        model.setParam('OutputFlag', 0)
+        model.setParam('TimeLimit', time_limit)
+
+        # add bounds from previous layer as constraints
         input_set = Box(p_layer.bounds['out']['lb'], p_layer.bounds['out']['ub'])
         input_layer = InputLayer(input_set)
         input_layer.compute_bounds(method, **kwargs)
@@ -128,8 +296,8 @@ class QPLayer(BaseLayer):
         self.lb = -GRB.INFINITY * np.ones(self.A.shape[1])
         self.ub = GRB.INFINITY * np.ones(self.A.shape[1])
 
-        self.big_m_ineq = GRB.INFINITY * np.ones(self.F.shape[0])
-        self.big_m_lam = GRB.INFINITY * np.ones(self.F.shape[0])
+        self.big_m_ineq = dual_bound * np.ones(self.F.shape[0])
+        self.big_m_lam = dual_bound * np.ones(self.F.shape[0])
 
         self.add_vars(model)
         model.update()
@@ -141,13 +309,15 @@ class QPLayer(BaseLayer):
             model.setObjective(self.g[i] - LinExpr(F_col_coef, [self.vars['x'][j] for j in F_col_idx]), GRB.MAXIMIZE)
             model.update()
             model.optimize()
-            self.big_m_ineq[i] = model.objBound
+            if model.Status == GRB.OPTIMAL:
+                self.big_m_ineq[i] = model.objBound
 
         for i in trange(self.F.shape[0], desc='QP Dual Bound'):
             model.setObjective(self.vars['lam'][i], GRB.MAXIMIZE)
             model.update()
             model.optimize()
-            self.big_m_lam[i] = model.objBound
+            if model.Status == GRB.OPTIMAL:
+                self.big_m_lam[i] = model.objBound
 
         if with_output:
             i = 0
@@ -159,14 +329,16 @@ class QPLayer(BaseLayer):
                     model.setObjective(self.vars['x'][idx + k], GRB.MINIMIZE)
                     model.update()
                     model.optimize()
-                    self.lb[idx + k] = model.objBound
+                    if model.Status == GRB.OPTIMAL:
+                        self.lb[idx + k] = model.objBound
                     if self.lb[idx + k] == -GRB.INFINITY:
                         warnings.warn('QP Problem output variables are not lower bounded. Consider adding explicit bounds.')
 
                     model.setObjective(self.vars['x'][idx + k], GRB.MAXIMIZE)
                     model.update()
                     model.optimize()
-                    self.ub[idx + k] = model.objBound
+                    if model.Status == GRB.OPTIMAL:
+                        self.ub[idx + k] = model.objBound
                     if self.ub[idx + k] == GRB.INFINITY:
                         warnings.warn('QP Problem output variables are not upper bounded. Consider adding explicit bounds.')
 

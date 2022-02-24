@@ -34,6 +34,25 @@ class ReluLayer(BaseLayer):
                     model.addConstr((self.vars['r'][i] == 1) >> (p_layer.vars['out'][i] >= 0))
                     model.addConstr((self.vars['r'][i] == 0) >> (p_layer.vars['out'][i] <= 0))
 
+    def add_vars_jacobian(self, model, p_layer):
+        self.vars['out_jac'] = np.empty(p_layer.vars['out_jac'].shape, dtype=object)
+        for i in range(p_layer.vars['out_jac'].shape[0]):
+            for j in range(p_layer.vars['out_jac'].shape[1]):
+                self.vars['out_jac'][i, j] = model.addVar(vtype=GRB.CONTINUOUS, lb=-GRB.INFINITY, ub=GRB.INFINITY)
+
+    def add_constr_jacobian(self, model, p_layer):
+        for i in range(p_layer.vars['out_jac'].shape[0]):
+            for j in range(p_layer.vars['out_jac'].shape[1]):
+                model.addConstr(self.vars['out_jac'][i, j] >= p_layer.jacobian_bounds['out']['lb'][i, j] * self.vars['r'][i])
+                model.addConstr(self.vars['out_jac'][i, j] <= p_layer.jacobian_bounds['out']['ub'][i, j] * self.vars['r'][i])
+                model.addConstr(self.vars['out_jac'][i, j] - p_layer.vars['out_jac'][i, j] >= -p_layer.jacobian_bounds['out']['ub'][i, j] * (1 - self.vars['r'][i]))
+                model.addConstr(self.vars['out_jac'][i, j] - p_layer.vars['out_jac'][i, j] <= -p_layer.jacobian_bounds['out']['lb'][i, j] * (1 - self.vars['r'][i]))
+
+    def compute_bounds_jacobian(self, p_layer, **kwargs):
+        self.jacobian_bounds['out'] = {}
+        self.jacobian_bounds['out']['lb'] = np.minimum(p_layer.jacobian_bounds['out']['lb'], 0)
+        self.jacobian_bounds['out']['ub'] = np.maximum(p_layer.jacobian_bounds['out']['ub'], 0)
+
     def compute_bounds(self, method, p_layer, **kwargs):
         if method == BoundArithmetic.INT_ARITHMETIC:
             self._compute_bounds_ia(p_layer)

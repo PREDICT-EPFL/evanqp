@@ -1,4 +1,5 @@
-from gurobipy import LinExpr
+import numpy as np
+from gurobipy import GRB, LinExpr
 
 from evanqp.sets import Box, Polytope
 from evanqp.zonotope import Zonotope
@@ -23,6 +24,23 @@ class InputLayer(BaseLayer):
             A, b = self.input_set.A, self.input_set.b
             for i in range(A.shape[0]):
                 model.addConstr(LinExpr(A[i, :], self.vars['out']) <= b[i])
+
+    def add_vars_jacobian(self, model, p_layer):
+        self.vars['out_jac'] = np.empty((self.out_size, self.out_size), dtype=object)
+        for i in range(self.out_size):
+            for j in range(self.out_size):
+                if i == j:
+                    self.vars['out_jac'][i, j] = model.addVar(vtype=GRB.CONTINUOUS, lb=1.0, ub=1.0)
+                else:
+                    self.vars['out_jac'][i, j] = model.addVar(vtype=GRB.CONTINUOUS, lb=0.0, ub=0.0)
+
+    def add_constr_jacobian(self, model, p_layer):
+        pass
+
+    def compute_bounds_jacobian(self, p_layer=None, **kwargs):
+        self.jacobian_bounds['out'] = {}
+        self.jacobian_bounds['out']['lb'] = np.eye(self.out_size)
+        self.jacobian_bounds['out']['ub'] = np.eye(self.out_size)
 
     def compute_bounds(self, method, p_layer=None, **kwargs):
         if isinstance(self.input_set, Polytope):
