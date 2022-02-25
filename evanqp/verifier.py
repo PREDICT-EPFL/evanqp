@@ -53,9 +53,9 @@ class Verifier:
             ineqs += p.compute_ideal_cuts(model, self.input_layer, None)
         return ineqs
 
-    def setup_milp(self):
+    def setup_milp(self, **kwargs):
         if not self.bounds_calculated:
-            self.compute_bounds()
+            self.compute_bounds(**kwargs)
 
         self.input_layer.add_vars(self.model)
         for p in self.problems:
@@ -67,9 +67,9 @@ class Verifier:
             p.add_constr(self.model, self.input_layer)
         self.model.update()
 
-    def setup_milp_lipschitz(self):
+    def setup_milp_lipschitz(self, **kwargs):
         if not self.bounds_lipschitz_calculated:
-            self.compute_bounds_lipschitz()
+            self.compute_bounds_lipschitz(**kwargs)
 
         self.input_layer.add_vars_jacobian(self.model, None)
         for p in self.problems:
@@ -100,7 +100,7 @@ class Verifier:
         for problem in self.problems:
             problem.forward(guess, warm_start=True)
 
-    def approximation_error(self, norm=np.inf, threads=0, output_flag=1, feasibility_tol=None, int_feas_tol=None, optimality_tol=None, ideal_cuts=False, warm_start=True, guess=None):
+    def approximation_error(self, norm=np.inf, threads=0, output_flag=1, feasibility_tol=None, int_feas_tol=None, optimality_tol=None, ideal_cuts=False, warm_start=True, guess=None, **kwargs):
         if len(self.problems) != 2:
             raise Exception('Number of problems must be 2.')
         if self.problems[0].out_size != self.problems[0].out_size:
@@ -116,7 +116,7 @@ class Verifier:
         if optimality_tol is not None:
             self.model.setParam('OptimalityTol', optimality_tol)
 
-        self.setup_milp()
+        self.setup_milp(**kwargs)
         if warm_start:
             self.warm_start(guess)
 
@@ -143,7 +143,7 @@ class Verifier:
 
         return self.model.objBound, np.array([p.x for p in self.input_layer.vars['out']])
 
-    def verify_stability_sufficient(self, threads=0, output_flag=1, feasibility_tol=None, int_feas_tol=None, optimality_tol=None, ideal_cuts=False, warm_start=True, guess=None):
+    def verify_stability_sufficient(self, threads=0, output_flag=1, feasibility_tol=None, int_feas_tol=None, optimality_tol=None, ideal_cuts=False, warm_start=True, guess=None, **kwargs):
         if len(self.problems) != 2:
             raise Exception('Number of problems must be 2.')
         if not isinstance(self.problems[0].problem, MPCProblem):
@@ -162,7 +162,7 @@ class Verifier:
             self.model.setParam('OptimalityTol', optimality_tol)
 
         if not self.bounds_calculated:
-            self.compute_bounds()
+            self.compute_bounds(**kwargs)
 
         reduced_objective_problem = copy(mpc_problem)
 
@@ -173,7 +173,7 @@ class Verifier:
         reduced_objective_problem.problem = types.MethodType(problem_patch, reduced_objective_problem)
 
         reduced_objective_mpc_layer = QPLayer(reduced_objective_problem, 1)
-        reduced_objective_mpc_layer.compute_bounds(BoundArithmetic.INT_ARITHMETIC, self.input_layer)
+        reduced_objective_mpc_layer.compute_bounds(BoundArithmetic.INT_ARITHMETIC, self.input_layer, **kwargs)
 
         self.input_layer.add_vars(self.model)
         self.problems[0].add_vars(self.model, only_primal=True)
@@ -220,7 +220,7 @@ class Verifier:
 
         return self.model.objBound, np.array([p.x for p in self.input_layer.vars['out']])
 
-    def verify_stability_direct(self, threads=0, output_flag=1, feasibility_tol=None, int_feas_tol=None, optimality_tol=None, ideal_cuts=False, warm_start=True, guess=None):
+    def verify_stability_direct(self, threads=0, output_flag=1, feasibility_tol=None, int_feas_tol=None, optimality_tol=None, ideal_cuts=False, warm_start=True, guess=None, **kwargs):
         if len(self.problems) != 2:
             raise Exception('Number of problems must be 2.')
         if not isinstance(self.problems[0].problem, MPCProblem):
@@ -248,9 +248,9 @@ class Verifier:
         next_state_layer = LinearLayer(weight, bias, x_u_layer.depth + 1)
         mpc_cost_next_state_layer = QPLayer(mpc_problem, next_state_layer.depth + 1)
 
-        x_u_layer.compute_bounds(BoundArithmetic.ZONO_ARITHMETIC, (self.input_layer, self.problems[1]))
-        next_state_layer.compute_bounds(BoundArithmetic.ZONO_ARITHMETIC, x_u_layer)
-        mpc_cost_next_state_layer.compute_bounds(BoundArithmetic.ZONO_ARITHMETIC, next_state_layer)
+        x_u_layer.compute_bounds(BoundArithmetic.ZONO_ARITHMETIC, (self.input_layer, self.problems[1]), **kwargs)
+        next_state_layer.compute_bounds(BoundArithmetic.ZONO_ARITHMETIC, x_u_layer, **kwargs)
+        mpc_cost_next_state_layer.compute_bounds(BoundArithmetic.ZONO_ARITHMETIC, next_state_layer, **kwargs)
 
         self.input_layer.add_vars(self.model)
         self.problems[0].add_vars(self.model, only_primal=True)
@@ -297,7 +297,7 @@ class Verifier:
 
         return self.model.objBound, np.array([p.x for p in self.input_layer.vars['out']])
 
-    def stable_region_outer_approx(self, seed_polytope, threads=0, output_flag=0, feasibility_tol=None, int_feas_tol=None, optimality_tol=None, ideal_cuts=False, warm_start=True, guess=None):
+    def stable_region_outer_approx(self, seed_polytope, threads=0, output_flag=0, feasibility_tol=None, int_feas_tol=None, optimality_tol=None, ideal_cuts=False, warm_start=True, guess=None, **kwargs):
         if len(self.problems) != 2:
             raise Exception('Number of problems must be 2.')
         if not isinstance(self.problems[0].problem, MPCProblem):
@@ -316,7 +316,7 @@ class Verifier:
             self.model.setParam('OptimalityTol', optimality_tol)
 
         if not self.bounds_calculated:
-            self.compute_bounds()
+            self.compute_bounds(**kwargs)
 
         x_u_layer = ConcatLayer(self.input_layer.out_size + self.problems[1].out_size, self.problems[1].depth + 1)
         A, B = self.problems[0].problem.dynamics()
@@ -325,9 +325,9 @@ class Verifier:
         next_state_layer = LinearLayer(weight, bias, x_u_layer.depth + 1)
         mpc_cost_next_state_layer = QPLayer(mpc_problem, next_state_layer.depth + 1)
 
-        x_u_layer.compute_bounds(BoundArithmetic.ZONO_ARITHMETIC, (self.input_layer, self.problems[1]))
-        next_state_layer.compute_bounds(BoundArithmetic.ZONO_ARITHMETIC, x_u_layer)
-        mpc_cost_next_state_layer.compute_bounds(BoundArithmetic.ZONO_ARITHMETIC, next_state_layer)
+        x_u_layer.compute_bounds(BoundArithmetic.ZONO_ARITHMETIC, (self.input_layer, self.problems[1]), **kwargs)
+        next_state_layer.compute_bounds(BoundArithmetic.ZONO_ARITHMETIC, x_u_layer, **kwargs)
+        mpc_cost_next_state_layer.compute_bounds(BoundArithmetic.ZONO_ARITHMETIC, next_state_layer, **kwargs)
 
         self.input_layer.add_vars(self.model)
         self.problems[0].add_vars(self.model, only_primal=True)
@@ -363,7 +363,7 @@ class Verifier:
 
         return Polytope(seed_polytope.A, b)
 
-    def lipschitz_constant(self, norm=np.inf, threads=0, output_flag=1, feasibility_tol=None, int_feas_tol=None, optimality_tol=None, ideal_cuts=False, warm_start=False, guess=None):
+    def lipschitz_constant(self, norm=np.inf, threads=0, output_flag=1, feasibility_tol=None, int_feas_tol=None, optimality_tol=None, ideal_cuts=False, warm_start=False, guess=None, **kwargs):
         if len(self.problems) != 1:
             raise Exception('Number of problems must be 1.')
 
@@ -377,8 +377,8 @@ class Verifier:
         if optimality_tol is not None:
             self.model.setParam('OptimalityTol', optimality_tol)
 
-        self.setup_milp()
-        self.setup_milp_lipschitz()
+        self.setup_milp(**kwargs)
+        self.setup_milp_lipschitz(**kwargs)
 
         if warm_start:
             self.warm_start(guess)
@@ -417,7 +417,7 @@ class Verifier:
 
         return self.model.objBound, jacobian, np.array([p.x for p in self.input_layer.vars['out']])
 
-    def approximation_error_lipschitz_constant(self, norm=np.inf, threads=0, output_flag=1, feasibility_tol=None, int_feas_tol=None, optimality_tol=None, ideal_cuts=False, warm_start=False, guess=None):
+    def approximation_error_lipschitz_constant(self, norm=np.inf, threads=0, output_flag=1, feasibility_tol=None, int_feas_tol=None, optimality_tol=None, ideal_cuts=False, warm_start=False, guess=None, **kwargs):
         if len(self.problems) != 2:
             raise Exception('Number of problems must be 2.')
         if self.problems[0].out_size != self.problems[0].out_size:
@@ -433,8 +433,8 @@ class Verifier:
         if optimality_tol is not None:
             self.model.setParam('OptimalityTol', optimality_tol)
 
-        self.setup_milp()
-        self.setup_milp_lipschitz()
+        self.setup_milp(**kwargs)
+        self.setup_milp_lipschitz(**kwargs)
 
         if warm_start:
             self.warm_start(guess)
@@ -482,7 +482,7 @@ class Verifier:
 
         return self.model.objBound, jacobian0, jacobian1, np.array([p.x for p in self.input_layer.vars['out']])
 
-    def variables_in_polytope(self, poly, eps=1e-6, threads=0, output_flag=1, warm_start=True, guess=None):
+    def variables_in_polytope(self, poly, eps=1e-6, threads=0, output_flag=1, warm_start=True, guess=None, **kwargs):
         if len(self.problems) != 1:
             raise Exception('Number of problems must be 1.')
         if not isinstance(poly, Polytope):
@@ -494,7 +494,7 @@ class Verifier:
         self.model.setParam('OutputFlag', output_flag)
         self.model.setParam('Threads', threads)
 
-        self.setup_milp()
+        self.setup_milp(**kwargs)
         if warm_start:
             self.warm_start(guess)
 
@@ -509,7 +509,7 @@ class Verifier:
         return True
 
     @staticmethod
-    def min_optimal_mpc_horizon(parameter_set, mpc_factory, poly, eps=1e-6, threads=0, warm_start=True, guess=None):
+    def min_optimal_mpc_horizon(parameter_set, mpc_factory, poly, eps=1e-6, threads=0, warm_start=True, guess=None, **kwargs):
         N = 1
         mpc_problem = mpc_factory(N)
         print(f'Checking N = {N}')
@@ -528,7 +528,7 @@ class Verifier:
             mpc_problem = mpc_factory(N)
             print(f'Checking N = {N}')
             verifier = Verifier(parameter_set, mpc_problem)
-            res = verifier.variables_in_polytope(poly, eps=eps, threads=threads, output_flag=0)
+            res = verifier.variables_in_polytope(poly, eps=eps, threads=threads, output_flag=0, **kwargs)
             if res:
                 ub = N
             else:
