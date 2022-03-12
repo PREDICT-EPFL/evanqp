@@ -126,7 +126,7 @@ class Verifier:
             self.model.addConstr(diff[i] == self.problems[0].vars['out'][i] - self.problems[1].vars['out'][i])
             self.model.addConstr(abs_diff[i] == abs_(diff[i]))
 
-        error_norm = self.model.addVar(vtype=GRB.CONTINUOUS)
+        error_norm = self.model.addVar(vtype=GRB.CONTINUOUS, lb=0, ub=GRB.INFINITY)
         if norm == np.inf:
             self.model.addConstr(error_norm == max_(abs_diff))
         elif norm == 1:
@@ -172,23 +172,30 @@ class Verifier:
         reduced_objective_problem.original_problem = reduced_objective_problem.problem
         reduced_objective_problem.problem = types.MethodType(problem_patch, reduced_objective_problem)
 
+        # monkey patch original mpc problem by adding u0 to parameters
+        def parameters_patch(_self):
+            return _self.original_parameters() + _self.variables()
+        reduced_objective_problem.original_parameters = reduced_objective_problem.parameters
+        reduced_objective_problem.parameters = types.MethodType(parameters_patch, reduced_objective_problem)
+
+        x_u_layer = ConcatLayer(self.input_layer.out_size + self.problems[1].out_size, self.problems[1].depth + 1)
         reduced_objective_mpc_layer = QPLayer(reduced_objective_problem, 1)
-        reduced_objective_mpc_layer.compute_bounds(BoundArithmetic.INT_ARITHMETIC, self.input_layer, **kwargs)
+
+        x_u_layer.compute_bounds(BoundArithmetic.ZONO_ARITHMETIC, (self.input_layer, self.problems[1]), **kwargs)
+        reduced_objective_mpc_layer.compute_bounds(BoundArithmetic.ZONO_ARITHMETIC, x_u_layer, **kwargs)
 
         self.input_layer.add_vars(self.model)
         self.problems[0].add_vars(self.model, only_primal=True)
-        reduced_objective_mpc_layer.add_vars(self.model)
         self.problems[1].add_vars(self.model)
+        x_u_layer.add_vars(self.model)
+        reduced_objective_mpc_layer.add_vars(self.model)
         self.model.update()
 
         self.input_layer.add_constr(self.model)
         self.problems[0].add_constr(self.model, self.input_layer, only_primal=True)
-        reduced_objective_mpc_layer.add_constr(self.model, self.input_layer)
         self.problems[1].add_constr(self.model, self.input_layer)
-        self.model.update()
-
-        for i in range(reduced_objective_mpc_layer.out_size):
-            self.model.addConstr(reduced_objective_mpc_layer.vars['out'][i] == self.problems[1].vars['out'][i])
+        x_u_layer.add_constr(self.model, (self.input_layer, self.problems[1]))
+        reduced_objective_mpc_layer.add_constr(self.model, x_u_layer)
         self.model.update()
 
         if warm_start:
@@ -443,12 +450,12 @@ class Verifier:
         abs_diff_jac_T = np.empty((self.problems[0].vars['out_jac'].shape[1], self.problems[0].vars['out_jac'].shape[0]), dtype=object)
         for i in range(self.problems[0].vars['out_jac'].shape[0]):
             for j in range(self.problems[0].vars['out_jac'].shape[1]):
-                diff_jac_T[j, i] = self.model.addVar(vtype=GRB.CONTINUOUS, lb=0, ub=GRB.INFINITY)
+                diff_jac_T[j, i] = self.model.addVar(vtype=GRB.CONTINUOUS, lb=-GRB.INFINITY, ub=GRB.INFINITY)
                 abs_diff_jac_T[j, i] = self.model.addVar(vtype=GRB.CONTINUOUS, lb=0, ub=GRB.INFINITY)
                 self.model.addConstr(diff_jac_T[j, i] == self.problems[0].vars['out_jac'][i, j] - self.problems[1].vars['out_jac'][i, j])
                 self.model.addConstr(abs_diff_jac_T[j, i] == abs_(diff_jac_T[j, i]))
 
-        lipschitz_norm = self.model.addVar(vtype=GRB.CONTINUOUS)
+        lipschitz_norm = self.model.addVar(vtype=GRB.CONTINUOUS, lb=0, ub=GRB.INFINITY)
         if norm == np.inf:
             lipschitz_norm_sum = [self.model.addVar(vtype=GRB.CONTINUOUS, lb=0, ub=GRB.INFINITY) for _ in range(self.problems[0].vars['out_jac'].shape[1])]
             for i in range(self.problems[0].vars['out_jac'].shape[1]):
