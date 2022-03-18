@@ -1,5 +1,4 @@
 import argparse
-import datetime
 
 import numpy as np
 import torch
@@ -8,7 +7,6 @@ import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader, random_split
 from torch.optim.lr_scheduler import StepLR
 from evanqp import FFNN
-from torch.utils.tensorboard import SummaryWriter
 
 # disable TF32 mode to increase numerical precision
 # (makes matrix operations on GPUs slower)
@@ -34,7 +32,7 @@ def loss_function(model, data, target):
     return loss
 
 
-def train(args, model, device, train_loader, optimizer, epoch, writer):
+def train(args, model, device, train_loader, optimizer, epoch):
     model.train()
     train_loss = 0
     for batch_idx, (data, target) in enumerate(train_loader):
@@ -56,11 +54,8 @@ def train(args, model, device, train_loader, optimizer, epoch, writer):
 
     train_loss /= len(train_loader)
 
-    if writer is not None:
-        writer.add_scalar('train/loss', train_loss, epoch)
 
-
-def test(model, device, test_loader, epoch, writer):
+def test(model, device, test_loader, epoch):
     model.eval()
     test_loss = 0
     with torch.no_grad():
@@ -72,8 +67,6 @@ def test(model, device, test_loader, epoch, writer):
     test_loss /= len(test_loader)
 
     print('\nTest set: Average loss: {:.6f})\n'.format(test_loss))
-    if writer is not None:
-        writer.add_scalar('test/loss', test_loss, epoch)
 
 
 def main():
@@ -107,8 +100,6 @@ def main():
                         help='for Saving the current Model')
     parser.add_argument('--model-file-name', type=str, default='double_integrator_ffnn.pt', metavar='S',
                         help='file name to save the model to')
-    parser.add_argument('--tensorboard', action='store_true', default=False,
-                        help='save training statistics for tensorboard')
     args = parser.parse_args()
     use_cuda = not args.no_cuda and torch.cuda.is_available()
 
@@ -144,20 +135,11 @@ def main():
     model = model.to(device)
     optimizer = optim.SGD(model.parameters(), lr=args.lr, momentum=0.9)
 
-    if args.tensorboard:
-        writer = SummaryWriter('runs/' + datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S'))
-    else:
-        writer = None
-
     scheduler = StepLR(optimizer, step_size=1, gamma=args.gamma)
     for epoch in range(1, args.epochs + 1):
-        train(args, model, device, train_loader, optimizer, epoch, writer)
-        test(model, device, test_loader, epoch, writer)
+        train(args, model, device, train_loader, optimizer, epoch)
+        test(model, device, test_loader, epoch)
         scheduler.step()
-        if args.tensorboard:
-            writer.flush()
-    if args.tensorboard:
-        writer.close()
 
     if args.save_model:
         torch.save({
