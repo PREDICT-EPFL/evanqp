@@ -26,10 +26,14 @@ The results can then be analysed in the Jupiter Notebook `benchmark_analysis.ipy
 
 To cite our work in other academic papers, please use the following BibTex entry:
 ```
-@misc{schwan2022,
-author = {Roland Schwan and Colin N. Jones and Daniel Kuhn},
-title = {Stability Verification of Neural Network Controllers using Mixed-Integer Programming},
-year = {2022},
-eprint = {arXiv:2206.13374},
+@ARTICLE{schwan2023,
+author={Schwan, Roland and Jones, Colin N. and Kuhn, Daniel},
+journal={IEEE Transactions on Automatic Control}, 
+title={Stability Verification of Neural Network Controllers Using Mixed-Integer Programming}, 
+year={2023},
+volume={},
+number={},
+pages={1-16},
+doi={10.1109/TAC.2023.3283213}
 }
 ```
