@@ -1,6 +1,6 @@
 # EVANQP
 
-[![DOI](https://img.shields.io/badge/DOI-10.48550/arXiv.2206.13374-green.svg)](https://doi.org/10.48550/arXiv.2206.13374) [![Preprint](https://img.shields.io/badge/Preprint-arXiv-blue.svg)](https://arxiv.org/abs/2206.13374) [![Funding](https://img.shields.io/badge/Grant-NCCR%20Automation%20(51NF40180545)-90e3dc.svg)](https://nccr-automation.ch/)
+[![DOI](https://img.shields.io/badge/DOI-10.1109/TAC.2023.3283213-green.svg)](https://doi.org/10.1109/TAC.2023.3283213) [![Preprint](https://img.shields.io/badge/Preprint-arXiv-blue.svg)](https://arxiv.org/abs/2206.13374) [![Funding](https://img.shields.io/badge/Grant-NCCR%20Automation%20(51NF40180545)-90e3dc.svg)](https://nccr-automation.ch/)
 
 EPFL Verifier for Approximate Neural Networks and QPs
 
