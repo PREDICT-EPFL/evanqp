@@ -31,9 +31,9 @@ author={Schwan, Roland and Jones, Colin N. and Kuhn, Daniel},
 journal={IEEE Transactions on Automatic Control}, 
 title={Stability Verification of Neural Network Controllers Using Mixed-Integer Programming}, 
 year={2023},
-volume={},
-number={},
-pages={1-16},
+volume={68},
+number={12},
+pages={7514-7529},
 doi={10.1109/TAC.2023.3283213}
 }
 ```
